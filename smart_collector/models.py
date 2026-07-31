@@ -197,6 +197,9 @@ class Candidate:
     referer: str = ""
     width: int = 0
     height: int = 0
+    context_text: str = ""
+    source_kind: str = ""
+    in_main_content: bool = False
 
 
 @dataclass(slots=True)

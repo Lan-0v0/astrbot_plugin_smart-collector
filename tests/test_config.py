@@ -61,7 +61,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.1.2"
+    assert metadata["version"] == "v0.1.3"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 

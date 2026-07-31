@@ -163,3 +163,130 @@ def test_video_resolution_is_inferred_from_common_url_patterns() -> None:
     )
     assert extractor._url_resolution("https://cdn.example/movie-1080p.mp4") == (0, 1080)
     assert extractor._url_resolution("https://cdn.example/movie.mp4") == (0, 0)
+
+
+def test_video_manifest_and_m4v_formats_are_recognized() -> None:
+    extractor = AdaptiveExtractor()
+    assert extractor._url_type("https://cdn.example/manifest.mpd") is ContentType.VIDEO
+    assert extractor._url_type("https://cdn.example/movie.m4v") is ContentType.VIDEO
+    assert extractor._mime_type("application/vnd.apple.mpegurl") is ContentType.VIDEO
+    assert extractor._mime_type("application/dash+xml; charset=utf-8") is ContentType.VIDEO
+
+
+def test_html_and_json_video_candidates_keep_the_source_referer() -> None:
+    extractor = AdaptiveExtractor()
+    page_url = "https://source.example/watch/1"
+    html_candidates, _ = extractor.extract(
+        response(
+            b"<video src='https://cdn.example/movie.mp4'></video>",
+            "text/html",
+            page_url,
+        ),
+        (ContentType.VIDEO,),
+    )
+    assert html_candidates[0].referer == page_url
+    json_candidates, _ = extractor.extract(
+        response(
+            json.dumps({"video": "https://cdn.example/movie.mp4"}).encode(),
+            "application/json",
+            page_url,
+        ),
+        (ContentType.VIDEO,),
+    )
+    assert json_candidates[0].referer == page_url
+
+
+def test_json_video_keys_support_relative_and_extensionless_urls() -> None:
+    extractor = AdaptiveExtractor()
+    payload = {
+        "data": {
+            "video_url": "/delivery?id=123",
+            "play_url": "https://cdn.example/signed?id=456",
+            "manifest": "../streams/main.mpd",
+        }
+    }
+    candidates, profile = extractor.extract(
+        response(
+            json.dumps(payload).encode(),
+            "application/json",
+            "https://api.example/v1/items/1",
+        ),
+        (ContentType.VIDEO,),
+    )
+    assert [candidate.url for candidate in candidates] == [
+        "https://api.example/delivery?id=123",
+        "https://cdn.example/signed?id=456",
+        "https://api.example/v1/streams/main.mpd",
+    ]
+    assert all(candidate.content_type is ContentType.VIDEO for candidate in candidates)
+
+    changed = {"data": {"video_url": "/delivery?id=789"}}
+    reused, _ = extractor.extract(
+        response(
+            json.dumps(changed).encode(),
+            "application/json",
+            "https://api.example/v1/items/1",
+        ),
+        (ContentType.VIDEO,),
+        profile,
+    )
+    assert reused[0].url == "https://api.example/delivery?id=789"
+
+
+def test_lazy_embed_and_video_attributes_are_discovered() -> None:
+    extractor = AdaptiveExtractor()
+    page = response(
+        b"""<iframe data-lazy-src='/embed/1'></iframe>
+        <video data-video='/delivery?id=1'></video>
+        <source data-src='/movie.m4v'>""",
+        "text/html",
+        "https://example.com/watch",
+    )
+    assert extractor.extract_embed_links(page) == ["https://example.com/embed/1"]
+    candidates, _ = extractor.extract(page, (ContentType.VIDEO,))
+    assert {candidate.url for candidate in candidates} == {
+        "https://example.com/delivery?id=1",
+        "https://example.com/movie.m4v",
+    }
+
+
+def test_image_metadata_prefers_largest_srcset_and_keeps_content_context() -> None:
+    html = b"""<html><head><title>Gallery</title></head><body>
+    <header><img id='site-logo' src='/logo.png' width='64' height='64'></header>
+    <main><figure><img alt='blue cat wallpaper' width='800' height='600'
+      src='/fallback.jpg' srcset='/large.jpg 1600w, /small.jpg 320w'>
+      <figcaption>Blue cat in the night</figcaption></figure></main>
+    </body></html>"""
+    candidates, _ = AdaptiveExtractor().extract(
+        response(html, "text/html", "https://example.com/gallery"),
+        (ContentType.IMAGE,),
+    )
+    large = next(item for item in candidates if item.url.endswith("/large.jpg"))
+    logo = next(item for item in candidates if item.url.endswith("/logo.png"))
+    assert large.width == 1600
+    assert large.source_kind == "srcset"
+    assert large.in_main_content
+    assert "blue cat wallpaper" in large.context_text
+    assert "Blue cat in the night" in large.context_text
+    assert not logo.in_main_content
+
+
+def test_image_json_keys_allow_extensionless_original_urls() -> None:
+    candidates, _ = AdaptiveExtractor().extract(
+        response(
+            json.dumps(
+                {
+                    "image_original": "https://cdn.example/delivery?id=1",
+                    "thumbnail": "/thumb?id=1",
+                }
+            ).encode(),
+            "application/json",
+            "https://api.example/item/1",
+        ),
+        (ContentType.IMAGE,),
+    )
+    assert [item.url for item in candidates] == [
+        "https://cdn.example/delivery?id=1",
+        "https://api.example/thumb?id=1",
+    ]
+    assert all(item.source_kind == "json" for item in candidates)

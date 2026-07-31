@@ -66,3 +66,33 @@ def test_non_numeric_api_code_is_not_treated_as_rejected() -> None:
         json.dumps({"code": "Unauthorized"}).encode(),
     )
     assert not AntiBotFetcher._api_key_rejected(response)
+
+
+def test_probe_falls_back_to_range_get_when_head_is_not_supported() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.headers.get("range", "")))
+        if request.method == "HEAD":
+            return httpx.Response(405, request=request)
+        return httpx.Response(
+            206,
+            headers={"content-type": "video/mp4", "content-range": "bytes 0-0/1000"},
+            content=b"x",
+            request=request,
+        )
+
+    async def scenario() -> None:
+        fetcher = AntiBotFetcher(timeout=2)
+        await fetcher._client.aclose()
+        fetcher._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            result = await fetcher.probe("https://cdn.example/play?id=1")
+            assert result and result.status == 206
+            assert result.content_type == "video/mp4"
+            assert result.transport == "httpx-range-probe"
+            assert requests == [("HEAD", ""), ("GET", "bytes=0-0")]
+        finally:
+            await fetcher.close()
+
+    asyncio.run(scenario())

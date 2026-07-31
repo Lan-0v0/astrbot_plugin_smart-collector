@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import mimetypes
 import random
 import re
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from PIL import Image, UnidentifiedImageError
 
 from .cache import CacheStore
-from .extractor import AdaptiveExtractor
+from .extractor import VIDEO_MANIFEST_MIME_TYPES, AdaptiveExtractor
 from .fetcher import AntiBotFetcher, FetchError
 from .models import (
     CONTENT_PRIORITY,
@@ -32,6 +35,32 @@ class RateLimitError(CollectionError):
     def __init__(self, remaining: float) -> None:
         self.remaining = max(0.0, remaining)
         super().__init__(f"请求过快，请在 {self.remaining:.1f} 秒后重试")
+
+
+IMAGE_UI_PATTERN = re.compile(
+    r"(?:^|[/_.\-\s])(icon|logo|avatar|emoji|badge|sprite|favicon|tracker|pixel)(?:[/_.\-\s]|$)",
+    re.IGNORECASE,
+)
+IMAGE_AD_PATTERN = re.compile(
+    r"(?:^|[/_.\-\s])(ad|ads|advert|banner|promo|sponsor)(?:[/_.\-\s]|$)",
+    re.IGNORECASE,
+)
+IMAGE_THUMB_PATTERN = re.compile(r"(?:thumb|thumbnail|small|tiny|preview)", re.IGNORECASE)
+IMAGE_ORIGINAL_PATTERN = re.compile(r"(?:original|orig|full|master|large|hires|raw)", re.IGNORECASE)
+IMAGE_QUERY_STOPWORDS = {
+    "图片",
+    "图像",
+    "照片",
+    "插画",
+    "爬取",
+    "抓取",
+    "采集",
+    "一张",
+    "一些",
+    "一个",
+    "高清",
+    "原图",
+}
 
 
 class CollectorPipeline:
@@ -64,12 +93,13 @@ class CollectorPipeline:
         sources: list[SourceConfig],
         requested: tuple[ContentType, ...] | None,
         user_key: str,
+        query: str = "",
     ) -> tuple[SourceConfig, CollectedAsset]:
         enabled = [source for source in sources if source.enabled]
         if not enabled:
             raise CollectionError("没有已启用的自定义爬取项")
         results = await asyncio.gather(
-            *(self.collect(source, requested, user_key) for source in enabled),
+            *(self.collect(source, requested, user_key, query) for source in enabled),
             return_exceptions=True,
         )
         successful: list[tuple[SourceConfig, CollectedAsset]] = []
@@ -89,6 +119,7 @@ class CollectorPipeline:
         source: SourceConfig,
         requested: tuple[ContentType, ...] | None,
         user_key: str,
+        query: str = "",
     ) -> CollectedAsset:
         await self._check_rate(source, user_key)
         allowed_types = tuple(
@@ -101,11 +132,32 @@ class CollectorPipeline:
         asset: CollectedAsset | None = None
         try:
             direct_type = self.extractor._url_type(source.url)
+            direct_mime = ""
+            source_probe = getattr(self.fetcher, "probe", None)
+            if (
+                direct_type is None
+                and allowed_types in {(ContentType.VIDEO,), (ContentType.IMAGE,)}
+                and callable(source_probe)
+            ):
+                probe = await source_probe(
+                    source.url, headers=AntiBotFetcher.source_headers(source)
+                )
+                if probe and 200 <= probe.status < 300:
+                    direct_type = self.extractor._mime_type(probe.content_type)
+                    direct_mime = probe.content_type
             if direct_type in allowed_types:
                 asset = await self._try_candidates(
                     source,
                     FetchResponse(source.url, 200, "", b""),
-                    [Candidate(direct_type, url=source.url)],
+                    [
+                        Candidate(
+                            direct_type,
+                            url=source.url,
+                            mime_type=direct_mime,
+                            selector="__source_probe__" if direct_mime else "",
+                        )
+                    ],
+                    query,
                 )
             if asset is None:
                 response = await self.fetcher.fetch_source(source)
@@ -126,9 +178,11 @@ class CollectorPipeline:
                 candidates, new_profile = self.extractor.extract(response, allowed_types, profile)
                 if new_profile and new_profile != profile:
                     await self.cache.save_profile(source.key, new_profile)
-                asset = await self._collect_by_priority(source, response, candidates, allowed_types)
+                asset = await self._collect_by_priority(
+                    source, response, candidates, allowed_types, query
+                )
         except Exception as exc:
-            cached = await self._cached_fallback(source, allowed_types)
+            cached = await self._cached_fallback(source, allowed_types, query)
             if cached:
                 asset = cached
             else:
@@ -158,6 +212,7 @@ class CollectorPipeline:
         source_response: FetchResponse,
         candidates: list[Candidate],
         allowed_types: tuple[ContentType, ...],
+        query: str = "",
     ) -> CollectedAsset:
         detail_candidates: list[Candidate] | None = None
         for content_type in CONTENT_PRIORITY:
@@ -167,6 +222,7 @@ class CollectorPipeline:
                 source,
                 source_response,
                 [item for item in candidates if item.content_type is content_type],
+                query,
             )
             if asset:
                 return asset
@@ -179,6 +235,7 @@ class CollectorPipeline:
                     source,
                     source_response,
                     [item for item in detail_candidates if item.content_type is content_type],
+                    query,
                 )
                 if asset:
                     return asset
@@ -191,11 +248,12 @@ class CollectorPipeline:
                         source.video_quality,
                         AntiBotFetcher.source_headers(source),
                     ),
+                    query,
                 )
                 if asset:
                     return asset
 
-        cached = await self._cached_fallback(source, allowed_types)
+        cached = await self._cached_fallback(source, allowed_types, query)
         if cached:
             return cached
         raise CollectionError("解析到了页面，但没有符合类型及去重规则的可发送内容")
@@ -205,28 +263,37 @@ class CollectorPipeline:
         source: SourceConfig,
         source_response: FetchResponse,
         candidates: list[Candidate],
+        query: str = "",
     ) -> CollectedAsset | None:
-        candidates = list(candidates)
-        self._rng.shuffle(candidates)
-        candidates = await self._prioritize_candidates(source, candidates)
-        for candidate in candidates[:100]:
-            direct_dynamic = candidate.selector == "__response__"
-            if candidate.url and not direct_dynamic:
-                cached = await self.cache.get_asset_by_origin(source.key, candidate.url)
-                if cached and await self.cache.is_allowed(
-                    source.key, cached.asset_key, source.dedupe
-                ):
-                    return cached
-            try:
-                asset = await self._materialize(source, candidate, source_response)
-            except Exception:
-                continue
-            if await self.cache.is_allowed(source.key, asset.asset_key, source.dedupe):
-                return asset
+        pending = list(candidates)
+        if pending and all(item.content_type is ContentType.IMAGE for item in pending):
+            pending.sort(key=lambda item: self._image_candidate_score(item, query, 0), reverse=True)
+        else:
+            self._rng.shuffle(pending)
+        for offset in range(0, min(len(pending), 300), 100):
+            batch = await self._prioritize_candidates(source, pending[offset : offset + 100], query)
+            for candidate in batch:
+                direct_dynamic = candidate.selector == "__response__"
+                if candidate.url and not direct_dynamic:
+                    cached = await self.cache.get_asset_by_origin(source.key, candidate.url)
+                    if (
+                        cached
+                        and await self.cache.is_allowed(source.key, cached.asset_key, source.dedupe)
+                        and await self._image_asset_matches(cached, candidate, query)
+                    ):
+                        return cached
+                try:
+                    asset = await self._materialize(source, candidate, source_response)
+                except Exception:
+                    continue
+                if await self.cache.is_allowed(
+                    source.key, asset.asset_key, source.dedupe
+                ) and await self._image_asset_matches(asset, candidate, query):
+                    return asset
         return None
 
     async def _prioritize_candidates(
-        self, source: SourceConfig, candidates: list[Candidate]
+        self, source: SourceConfig, candidates: list[Candidate], query: str = ""
     ) -> list[Candidate]:
         probe = getattr(self.fetcher, "probe", None)
         if not callable(probe) or not candidates:
@@ -244,7 +311,7 @@ class CollectorPipeline:
             return int(quality_enabled and not pixels), quality_rank, size_rank
 
         async def inspect(index: int, candidate: Candidate) -> tuple[int, int, int, int, int]:
-            if candidate.selector == "__response__":
+            if candidate.selector in {"__response__", "__source_probe__"}:
                 return (0, 1, 0, 0, index)
             if not candidate.url or candidate.content_type is ContentType.TEXT:
                 return (1, 1, 0, 0, index)
@@ -271,6 +338,13 @@ class CollectorPipeline:
             except (TypeError, ValueError):
                 size = 0
             actual_type = self.extractor._mime_type(response.content_type)
+            if candidate.content_type is ContentType.IMAGE:
+                score = self._image_candidate_score(candidate, query, size)
+                if 200 <= response.status < 300 and actual_type is ContentType.IMAGE:
+                    return (0, 0, -score, -size, index)
+                if 200 <= response.status < 300:
+                    return (1, 0, -score, -size, index)
+                return (2, 0, -score, -size, index)
             quality = quality_order(candidate, size)
             if 200 <= response.status < 300 and actual_type is candidate.content_type:
                 return (0, *quality, index)
@@ -280,11 +354,157 @@ class CollectorPipeline:
                 return (2, *quality, index)
             return (3, *quality, index)
 
-        inspected = await asyncio.gather(
-            *(inspect(index, candidate) for index, candidate in enumerate(candidates[:100]))
+        inspection_limit = (
+            30
+            if candidates and all(item.content_type is ContentType.IMAGE for item in candidates)
+            else 100
         )
-        ranked = sorted(zip(inspected, candidates[:100], strict=True), key=lambda item: item[0])
-        return [candidate for _, candidate in ranked] + candidates[100:]
+        inspected = await asyncio.gather(
+            *(
+                inspect(index, candidate)
+                for index, candidate in enumerate(candidates[:inspection_limit])
+            )
+        )
+        ranked = sorted(
+            zip(inspected, candidates[:inspection_limit], strict=True), key=lambda item: item[0]
+        )
+        return [candidate for _, candidate in ranked] + candidates[inspection_limit:]
+
+    @classmethod
+    def _image_candidate_score(cls, candidate: Candidate, query: str, size: int) -> int:
+        source_scores = {
+            "direct": 120,
+            "json_ld": 100,
+            "json": 90,
+            "json_profile": 90,
+            "open_graph": 85,
+            "image_src": 80,
+            "srcset": 75,
+            "twitter_card": 70,
+            "image_link": 65,
+            "image_element": 45,
+            "script": 40,
+            "css_background": 20,
+        }
+        score = source_scores.get(candidate.source_kind, 30)
+        if candidate.in_main_content:
+            score += 55
+        searchable = unquote(
+            " ".join(
+                (
+                    candidate.url,
+                    candidate.title,
+                    candidate.context_text,
+                    candidate.selector,
+                )
+            )
+        ).casefold()
+        if IMAGE_UI_PATTERN.search(searchable):
+            score -= 180
+        if IMAGE_AD_PATTERN.search(searchable):
+            score -= 260
+        if IMAGE_THUMB_PATTERN.search(searchable):
+            score -= 55
+        if IMAGE_ORIGINAL_PATTERN.search(searchable):
+            score += 35
+
+        pixels = candidate.width * candidate.height
+        if pixels:
+            score += min(70, max(0, int(math.log2(pixels)) * 4 - 45))
+            ratio = max(candidate.width, candidate.height) / max(
+                1, min(candidate.width, candidate.height)
+            )
+            if ratio > 8:
+                score -= 65
+        if size:
+            score += min(35, int(math.log2(max(1, size // 1024) + 1) * 4))
+
+        positive, negative, orientation, minimum = cls._image_query_requirements(query)
+        for term in positive:
+            if term in searchable:
+                score += 35 if len(term) > 1 else 18
+        for term in negative:
+            if term in searchable:
+                score -= 140
+        if candidate.width and candidate.height:
+            if orientation == "landscape":
+                score += 25 if candidate.width > candidate.height else -100
+            elif orientation == "portrait":
+                score += 25 if candidate.height > candidate.width else -100
+            elif orientation == "square":
+                ratio = candidate.width / candidate.height
+                score += 25 if 0.85 <= ratio <= 1.15 else -100
+            if minimum and (candidate.width < minimum[0] or candidate.height < minimum[1]):
+                score -= 150
+        return score
+
+    @staticmethod
+    def _image_query_requirements(
+        query: str,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], str, tuple[int, int] | None]:
+        text = re.sub(r"https?://\S+", " ", query.casefold())
+        resolution = re.search(r"(?<!\d)(\d{3,5})\s*[x×*]\s*(\d{3,5})(?!\d)", text)
+        minimum = (int(resolution.group(1)), int(resolution.group(2))) if resolution else None
+        orientation = ""
+        if any(term in text for term in ("横屏", "横向", "landscape")):
+            orientation = "landscape"
+        elif any(term in text for term in ("竖屏", "竖向", "portrait")):
+            orientation = "portrait"
+        elif any(term in text for term in ("方图", "正方形", "square")):
+            orientation = "square"
+
+        negative = tuple(
+            dict.fromkeys(
+                match.group(1).strip("，,。.;； ")
+                for match in re.finditer(r"(?:不要|排除|不含|没有)([\w\u4e00-\u9fff]{1,12})", text)
+                if match.group(1)
+            )
+        )
+        cleaned = re.sub(r"(?:不要|排除|不含|没有)[\w\u4e00-\u9fff]{1,12}", " ", text)
+        cleaned = re.sub(r"\d{3,5}\s*[x×*]\s*\d{3,5}", " ", cleaned)
+        for term in (*IMAGE_QUERY_STOPWORDS, "横屏", "横向", "竖屏", "竖向", "方图", "正方形"):
+            cleaned = cleaned.replace(term, " ")
+        chunks = re.findall(r"[a-z0-9]{2,}|[\u4e00-\u9fff]+", cleaned)
+        positive: list[str] = []
+        for chunk in chunks:
+            if chunk in IMAGE_QUERY_STOPWORDS:
+                continue
+            positive.append(chunk)
+            if len(chunk) >= 4 and re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+                positive.extend(chunk[index : index + 2] for index in range(len(chunk) - 1))
+        return tuple(dict.fromkeys(positive)), negative, orientation, minimum
+
+    @classmethod
+    async def _image_asset_matches(
+        cls, asset: CollectedAsset, candidate: Candidate, query: str
+    ) -> bool:
+        if candidate.content_type is not ContentType.IMAGE:
+            return True
+        if not asset.local_path or not asset.local_path.exists():
+            return False
+        try:
+            width, height = await asyncio.to_thread(cls._image_dimensions, asset.local_path)
+        except (OSError, UnidentifiedImageError, ValueError):
+            return False
+        candidate.width = width
+        candidate.height = height
+        if width <= 8 or height <= 8 or width * height <= 256:
+            return False
+        _, _, orientation, minimum = cls._image_query_requirements(query)
+        if minimum and (width < minimum[0] or height < minimum[1]):
+            return False
+        if orientation == "landscape" and width <= height:
+            return False
+        if orientation == "portrait" and height <= width:
+            return False
+        return orientation != "square" or 0.85 <= width / height <= 1.15
+
+    @staticmethod
+    def _image_dimensions(path: Path) -> tuple[int, int]:
+        with Image.open(path) as image:
+            width, height = image.size
+            image.verify()
+        return width, height
 
     @staticmethod
     def _candidate_headers(
@@ -310,7 +530,11 @@ class CollectorPipeline:
         if (
             candidate.content_type is ContentType.VIDEO
             and candidate.url
-            and urlsplit(candidate.url).path.lower().endswith(".m3u8")
+            and (
+                urlsplit(candidate.url).path.lower().endswith((".m3u8", ".mpd"))
+                or candidate.mime_type.split(";", 1)[0].lower() in VIDEO_MANIFEST_MIME_TYPES
+                or candidate.selector == "yt-dlp-download"
+            )
         ):
             return await self._materialize_hls(source, candidate)
         if candidate.content_type is ContentType.TEXT:
@@ -342,13 +566,35 @@ class CollectorPipeline:
         else:
             headers = self._candidate_headers(source, candidate)
             temporary = self.cache.files_dir / f".download-{uuid.uuid4().hex}"
+
+            async def validate_download(downloaded) -> str:
+                if downloaded.status >= 400:
+                    raise FetchError(f"资源返回 HTTP {downloaded.status}")
+                current_mime = downloaded.content_type or candidate.mime_type
+                actual_type = self.extractor._mime_type(current_mime)
+                if actual_type and actual_type is not candidate.content_type:
+                    raise FetchError("资源响应类型与解析类型不一致")
+                if "html" in current_mime or "json" in current_mime:
+                    raise FetchError("候选资源不是可下载媒体")
+                if candidate.content_type is ContentType.IMAGE:
+                    try:
+                        width, height = await asyncio.to_thread(
+                            self._image_dimensions, downloaded.local_path
+                        )
+                    except (OSError, UnidentifiedImageError, ValueError) as exc:
+                        raise FetchError("候选图片文件无效") from exc
+                    if width <= 8 or height <= 8 or width * height <= 256:
+                        raise FetchError("候选图片是极小占位图")
+                    candidate.width = width
+                    candidate.height = height
+                return current_mime
+
             try:
                 try:
                     downloaded = await self.fetcher.download(
                         candidate.url, temporary, headers=headers
                     )
-                    if downloaded.status >= 400:
-                        raise FetchError(f"资源返回 HTTP {downloaded.status}")
+                    mime_type = await validate_download(downloaded)
                 except FetchError:
                     if (
                         not candidate.referer
@@ -362,14 +608,7 @@ class CollectorPipeline:
                             source, candidate, include_cross_origin_referer=True
                         ),
                     )
-                if downloaded.status >= 400:
-                    raise FetchError(f"资源返回 HTTP {downloaded.status}")
-                mime_type = downloaded.content_type or candidate.mime_type
-                actual_type = self.extractor._mime_type(mime_type)
-                if actual_type and actual_type is not candidate.content_type:
-                    raise CollectionError("资源响应类型与解析类型不一致")
-                if "html" in mime_type or "json" in mime_type:
-                    raise CollectionError("候选资源不是可下载媒体")
+                    mime_type = await validate_download(downloaded)
                 origin_url = candidate.url
                 content_digest = downloaded.sha256
                 target = self.cache.files_dir / (
@@ -503,15 +742,22 @@ class CollectorPipeline:
         return digest.hexdigest()
 
     async def _cached_fallback(
-        self, source: SourceConfig, allowed_types: tuple[ContentType, ...]
+        self,
+        source: SourceConfig,
+        allowed_types: tuple[ContentType, ...],
+        query: str = "",
     ) -> CollectedAsset | None:
         assets = await self.cache.list_assets(source.key)
         for content_type in CONTENT_PRIORITY:
             if content_type not in allowed_types:
                 continue
             for asset in assets:
-                if asset.content_type is content_type and await self.cache.is_allowed(
-                    source.key, asset.asset_key, source.dedupe
+                if (
+                    asset.content_type is content_type
+                    and await self.cache.is_allowed(source.key, asset.asset_key, source.dedupe)
+                    and await self._image_asset_matches(
+                        asset, Candidate(content_type=content_type), query
+                    )
                 ):
                     return asset
         return None
@@ -583,6 +829,15 @@ class CollectorPipeline:
                             height=int(entry.get("height") or 0),
                         )
                     )
+            result.append(
+                Candidate(
+                    ContentType.VIDEO,
+                    url=url,
+                    title=info.get("title") or "",
+                    selector="yt-dlp-download",
+                    referer=url,
+                )
+            )
             return result
 
         try:
@@ -637,14 +892,17 @@ class CollectorPipeline:
 
         prioritized_embeds = sorted(embed_links.items(), key=embed_score)[:16]
 
+        def embed_headers(url: str, referer: str) -> dict[str, str]:
+            headers = {"Referer": referer}
+            if urlsplit(url).hostname == urlsplit(source.url).hostname:
+                headers.update(AntiBotFetcher.source_headers(source))
+            return headers
+
         embedded = await asyncio.gather(
             *(
                 self.fetcher.fetch(
                     url,
-                    headers={
-                        **AntiBotFetcher.source_headers(source),
-                        "Referer": referer,
-                    },
+                    headers=embed_headers(url, referer),
                 )
                 for url, referer in prioritized_embeds
             ),

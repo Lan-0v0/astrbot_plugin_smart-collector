@@ -115,11 +115,12 @@ class AntiBotFetcher:
         self._validate_url(url)
 
         async def request() -> FetchResponse | None:
+            timeout = 15.0 if self.timeout is None else min(15.0, max(0.1, self.timeout))
             try:
-                response = await self._client.head(url, headers=headers or {}, timeout=15.0)
+                response = await self._client.head(url, headers=headers or {}, timeout=timeout)
             except httpx.HTTPError:
                 return None
-            return FetchResponse(
+            result = FetchResponse(
                 url=str(response.url),
                 status=response.status_code,
                 content_type=response.headers.get("content-type", "").split(";", 1)[0].lower(),
@@ -127,6 +128,25 @@ class AntiBotFetcher:
                 headers=dict(response.headers),
                 transport="httpx-head",
             )
+            if result.status not in {405, 501} and result.content_type:
+                return result
+            range_headers = {**(headers or {}), "Range": "bytes=0-0"}
+            try:
+                async with self._client.stream(
+                    "GET", url, headers=range_headers, timeout=timeout
+                ) as ranged:
+                    return FetchResponse(
+                        url=str(ranged.url),
+                        status=ranged.status_code,
+                        content_type=ranged.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .lower(),
+                        body=b"",
+                        headers=dict(ranged.headers),
+                        transport="httpx-range-probe",
+                    )
+            except httpx.HTTPError:
+                return result
 
         if self._semaphore is None:
             return await request()

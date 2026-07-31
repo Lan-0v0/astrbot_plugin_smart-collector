@@ -82,7 +82,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.1.2",
+    "v0.1.3",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -122,7 +122,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.1.2 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.1.3 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -207,6 +207,7 @@ class SmartCollectorPlugin(Star):
                 sources,
                 wanted,
                 user_key=event.get_sender_id() or event.unified_msg_origin,
+                query=query,
             )
             await self._summarize(source, asset)
             result = event.chain_result(

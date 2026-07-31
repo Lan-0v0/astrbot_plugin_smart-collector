@@ -14,7 +14,7 @@ from jsbeautifier.unpackers import packer
 from .models import Candidate, ContentType, FetchResponse
 
 EXTENSIONS = {
-    ContentType.VIDEO: (".mp4", ".webm", ".mov", ".mkv", ".m3u8"),
+    ContentType.VIDEO: (".mp4", ".webm", ".mov", ".mkv", ".m4v", ".m3u8", ".mpd"),
     ContentType.AUDIO: (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"),
     ContentType.IMAGE: (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"),
 }
@@ -25,10 +25,16 @@ MIME_PREFIXES = {
     "image/": ContentType.IMAGE,
     "text/": ContentType.TEXT,
 }
+VIDEO_MANIFEST_MIME_TYPES = {
+    "application/dash+xml",
+    "application/mpegurl",
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+}
 
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>\\]+", re.IGNORECASE)
 SCRIPT_MEDIA_PATTERN = re.compile(
-    r"""["']([^"']+\.(?:m3u8|mp4|webm|mov|mkv|mp3|wav|ogg|m4a|flac|aac|jpg|jpeg|png|gif|webp|avif|bmp)(?:\?[^"']*)?)["']""",
+    r"""["']([^"']+\.(?:m3u8|mpd|mp4|webm|mov|mkv|m4v|mp3|wav|ogg|m4a|flac|aac|jpg|jpeg|png|gif|webp|avif|bmp)(?:\?[^"']*)?)["']""",
     re.IGNORECASE,
 )
 PAGE_QUERY_KEYS = {"page", "paged", "p", "pg"}
@@ -53,6 +59,7 @@ class AdaptiveExtractor:
                     title=self._filename(response.url),
                     mime_type=response.content_type,
                     selector="__response__",
+                    source_kind="direct",
                 )
             ], {"mode": "direct", "content_type": direct_type.value}
 
@@ -145,8 +152,10 @@ class AdaptiveExtractor:
             return []
         soup = BeautifulSoup(response.body.decode("utf-8", errors="replace"), "lxml")
         links: list[str] = []
-        for element in soup.select("iframe[src], embed[src]"):
-            raw = element.get("src")
+        for element in soup.select(
+            "iframe[src], iframe[data-src], iframe[data-lazy-src], embed[src], embed[data-src]"
+        ):
+            raw = element.get("src") or element.get("data-src") or element.get("data-lazy-src")
             if not isinstance(raw, str) or not raw.strip():
                 continue
             url = urljoin(response.url, raw.strip())
@@ -179,13 +188,24 @@ class AdaptiveExtractor:
                 continue
             value = self._get_json_path(payload, path_item.get("path", []))
             if isinstance(value, str):
+                try:
+                    forced_type = ContentType(path_item.get("content_type", ""))
+                except ValueError:
+                    forced_type = None
                 candidate = self._candidate_from_url(
-                    value, requested, title=path_item.get("title", "")
+                    urljoin(base_url, value),
+                    requested,
+                    title=path_item.get("title", ""),
+                    forced_type=forced_type,
                 )
                 if candidate:
                     candidate.selector = ".".join(map(str, path_item.get("path", [])))
+                    candidate.context_text = " ".join(map(str, path_item.get("path", [])))
+                    candidate.source_kind = "json_profile"
                     candidates.append(candidate)
         if candidates:
+            for candidate in candidates:
+                candidate.referer = candidate.referer or base_url
             return self._dedupe(candidates), profile
 
         paths: list[dict[str, Any]] = []
@@ -194,13 +214,51 @@ class AdaptiveExtractor:
             if not isinstance(value, str):
                 continue
             urls = URL_PATTERN.findall(value)
+            leaf = str(path[-1]).lower() if path else ""
+            forced_type = None
+            if ContentType.VIDEO in requested and (
+                "video" in leaf
+                or leaf
+                in {
+                    "contenturl",
+                    "content_url",
+                    "playurl",
+                    "play_url",
+                    "hls",
+                    "dash",
+                    "manifest",
+                }
+            ):
+                forced_type = ContentType.VIDEO
+            if (
+                forced_type is None
+                and ContentType.IMAGE in requested
+                and any(
+                    marker in leaf
+                    for marker in (
+                        "image",
+                        "img",
+                        "cover",
+                        "poster",
+                        "thumbnail",
+                        "artwork",
+                        "original",
+                    )
+                )
+            ):
+                forced_type = ContentType.IMAGE
+            if not urls and value.strip().startswith(("/", "./", "../")):
+                urls = [urljoin(base_url, value.strip())]
             for url in urls:
-                candidate = self._candidate_from_url(url, requested)
+                candidate = self._candidate_from_url(
+                    urljoin(base_url, url), requested, forced_type=forced_type
+                )
                 if candidate:
                     candidate.selector = ".".join(map(str, path))
+                    candidate.context_text = " ".join(map(str, path))
+                    candidate.source_kind = "json"
                     candidates.append(candidate)
                     paths.append({"path": path, "content_type": candidate.content_type.value})
-            leaf = str(path[-1]).lower() if path else ""
             if (
                 ContentType.TEXT in requested
                 and leaf in {"title", "text", "content", "description", "desc", "caption"}
@@ -213,6 +271,8 @@ class AdaptiveExtractor:
             candidates.append(
                 Candidate(ContentType.TEXT, text="\n\n".join(text_parts), title="API 文本")
             )
+        for candidate in candidates:
+            candidate.referer = candidate.referer or base_url
         return self._dedupe(candidates), {"mode": "json", "json_paths": paths[:50]}
 
     def _extract_html(
@@ -247,6 +307,8 @@ class AdaptiveExtractor:
                     if candidate:
                         candidate.selector = "script[type='application/ld+json']"
                         candidate.attribute = ".".join(map(str, item.get("path", [])))
+                        candidate.context_text = f"{title} {candidate.attribute}".strip()
+                        candidate.source_kind = "json_ld"
                         candidates.append(candidate)
             for item in profile.get("selectors", []):
                 if not isinstance(item, dict) or not isinstance(item.get("selector"), str):
@@ -263,6 +325,7 @@ class AdaptiveExtractor:
                     if candidate:
                         candidate.selector = item["selector"]
                         candidate.attribute = item.get("attribute", "src")
+                        self._apply_element_metadata(candidate, element, title)
                         candidates.append(candidate)
         selector_profile: list[dict[str, str]] = []
         json_ld_paths: list[dict[str, Any]] = []
@@ -275,11 +338,20 @@ class AdaptiveExtractor:
                 if not isinstance(value, str) or not value.startswith(("http://", "https://")):
                     continue
                 leaf = str(path[-1]).lower() if path else ""
-                forced_type = ContentType.VIDEO if leaf == "contenturl" else None
+                forced_type = None
+                payload_type = (
+                    str(payload.get("@type", "")).lower() if isinstance(payload, dict) else ""
+                )
+                if leaf == "contenturl" and "video" in payload_type:
+                    forced_type = ContentType.VIDEO
+                elif leaf == "contenturl" and "image" in payload_type:
+                    forced_type = ContentType.IMAGE
                 candidate = self._candidate_from_url(value, requested, title, forced_type)
                 if candidate:
                     candidate.selector = "script[type='application/ld+json']"
                     candidate.attribute = ".".join(map(str, path))
+                    candidate.context_text = f"{title} {candidate.attribute}".strip()
+                    candidate.source_kind = "json_ld"
                     candidates.append(candidate)
                     json_ld_paths.append(
                         {"path": path, "content_type": candidate.content_type.value}
@@ -291,6 +363,8 @@ class AdaptiveExtractor:
             ("audio[src]", "src", ContentType.AUDIO),
             ("audio source[src]", "src", ContentType.AUDIO),
             ("video[data-src]", "data-src", ContentType.VIDEO),
+            ("video[data-url]", "data-url", ContentType.VIDEO),
+            ("video[data-video]", "data-video", ContentType.VIDEO),
             ("audio[data-src]", "data-src", ContentType.AUDIO),
             ("img[data-original]", "data-original", ContentType.IMAGE),
             ("img[data-src]", "data-src", ContentType.IMAGE),
@@ -301,10 +375,18 @@ class AdaptiveExtractor:
             ("meta[property='og:video:secure_url']", "content", ContentType.VIDEO),
             ("meta[property='og:audio']", "content", ContentType.AUDIO),
             ("meta[property='og:image']", "content", ContentType.IMAGE),
+            ("meta[property='og:image:url']", "content", ContentType.IMAGE),
+            ("meta[property='og:image:secure_url']", "content", ContentType.IMAGE),
             ("meta[name='twitter:player:stream']", "content", ContentType.VIDEO),
+            ("meta[itemprop='contentUrl']", "content", ContentType.VIDEO),
+            ("link[rel='preload'][as='video']", "href", ContentType.VIDEO),
             ("meta[name='twitter:image']", "content", ContentType.IMAGE),
+            ("meta[name='twitter:image:src']", "content", ContentType.IMAGE),
+            ("link[rel='image_src']", "href", ContentType.IMAGE),
+            ("link[rel='preload'][as='image']", "href", ContentType.IMAGE),
             ("a[href]", "href", None),
             ("source[src]", "src", None),
+            ("source[data-src]", "data-src", None),
             ("source[srcset]", "srcset", None),
         )
         for selector, attribute, forced_type in rules:
@@ -316,17 +398,34 @@ class AdaptiveExtractor:
                 if not isinstance(raw, str) or not raw.strip():
                     continue
                 if attribute == "srcset":
-                    entries = [item.strip().split()[0] for item in raw.split(",") if item.strip()]
-                    raw = entries[-1] if entries else ""
+                    raw, srcset_width = self._best_srcset(raw)
+                else:
+                    srcset_width = 0
                 url = urljoin(response.url, raw.strip())
                 candidate = self._candidate_from_url(url, requested, title, forced_type)
                 if candidate:
                     candidate.selector = selector
                     candidate.attribute = attribute
+                    candidate.width = max(candidate.width, srcset_width)
+                    self._apply_element_metadata(candidate, element, title)
                     candidates.append(candidate)
                     found = True
             if found:
                 selector_profile.append({"selector": selector, "attribute": attribute})
+
+        if ContentType.IMAGE in requested:
+            for element in soup.select("[style*='background']")[:200]:
+                style = str(element.get("style") or "")
+                for raw in re.findall(r"url\((?:['\"]?)([^)'\"]+)", style, re.IGNORECASE):
+                    candidate = self._candidate_from_url(
+                        urljoin(response.url, raw.strip()), requested, title, ContentType.IMAGE
+                    )
+                    if candidate:
+                        candidate.selector = "[style*='background']"
+                        candidate.attribute = "style"
+                        self._apply_element_metadata(candidate, element, title)
+                        candidate.source_kind = "css_background"
+                        candidates.append(candidate)
 
         if ContentType.TEXT in requested:
             text = self._main_text(soup)
@@ -336,6 +435,8 @@ class AdaptiveExtractor:
                         ContentType.TEXT, text=text, title=title, selector="article, main, body"
                     )
                 )
+        for candidate in candidates:
+            candidate.referer = candidate.referer or response.url
         return self._dedupe(candidates), {
             "mode": "html",
             "selectors": selector_profile,
@@ -375,8 +476,92 @@ class AdaptiveExtractor:
             candidate.selector = "script:media"
             candidate.attribute = "packed-or-inline"
             candidate.referer = base_url
+            candidate.context_text = title
+            candidate.source_kind = "script"
             candidates.append(candidate)
         return candidates
+
+    @staticmethod
+    def _best_srcset(value: str) -> tuple[str, int]:
+        best_url = ""
+        best_width = 0
+        best_score = -1.0
+        for index, entry in enumerate(value.split(",")):
+            parts = entry.strip().split()
+            if not parts:
+                continue
+            score = float(index)
+            width = 0
+            if len(parts) > 1:
+                descriptor = parts[-1].lower()
+                try:
+                    if descriptor.endswith("w"):
+                        width = int(descriptor[:-1])
+                        score = width * 10.0
+                    elif descriptor.endswith("x"):
+                        score = float(descriptor[:-1]) * 1_000_000.0
+                except ValueError:
+                    pass
+            if score >= best_score:
+                best_url = parts[0]
+                best_width = width
+                best_score = score
+        return best_url, best_width
+
+    @staticmethod
+    def _apply_element_metadata(candidate: Candidate, element: Any, page_title: str) -> None:
+        parts = [
+            page_title,
+            str(element.get("alt") or ""),
+            str(element.get("title") or ""),
+            str(element.get("aria-label") or ""),
+            " ".join(element.get("class") or [])
+            if not isinstance(element.get("class"), str)
+            else str(element.get("class")),
+            str(element.get("id") or ""),
+        ]
+        figure = element.find_parent("figure")
+        if figure:
+            caption = figure.find("figcaption")
+            if caption:
+                parts.append(caption.get_text(" ", strip=True))
+        parent_link = element.find_parent("a")
+        if parent_link:
+            parts.append(str(parent_link.get("title") or ""))
+            parts.append(parent_link.get_text(" ", strip=True)[:500])
+        heading = element.find_previous(["h1", "h2", "h3"])
+        if heading:
+            parts.append(heading.get_text(" ", strip=True)[:500])
+        candidate.context_text = " ".join(dict.fromkeys(part for part in parts if part))[:2000]
+        candidate.in_main_content = bool(
+            element.find_parent(["article", "main"]) or element.find_parent(attrs={"role": "main"})
+        )
+        candidate.source_kind = AdaptiveExtractor._source_kind(candidate.selector)
+        for attribute in ("width", "height"):
+            raw = str(element.get(attribute) or "")
+            match = re.fullmatch(r"\s*(\d{1,5})(?:px)?\s*", raw, re.IGNORECASE)
+            if match:
+                setattr(
+                    candidate,
+                    attribute,
+                    max(getattr(candidate, attribute), int(match.group(1))),
+                )
+
+    @staticmethod
+    def _source_kind(selector: str) -> str:
+        if "og:image" in selector:
+            return "open_graph"
+        if "twitter:image" in selector:
+            return "twitter_card"
+        if "image_src" in selector:
+            return "image_src"
+        if "srcset" in selector:
+            return "srcset"
+        if selector.startswith("img"):
+            return "image_element"
+        if selector.startswith("a["):
+            return "image_link"
+        return "html"
 
     @staticmethod
     def _main_text(soup: BeautifulSoup) -> str:
@@ -465,8 +650,11 @@ class AdaptiveExtractor:
 
     @staticmethod
     def _mime_type(mime_type: str) -> ContentType | None:
+        normalized = mime_type.split(";", 1)[0].strip().lower()
+        if normalized in VIDEO_MANIFEST_MIME_TYPES:
+            return ContentType.VIDEO
         for prefix, content_type in MIME_PREFIXES.items():
-            if mime_type.startswith(prefix):
+            if normalized.startswith(prefix):
                 return content_type
         return None
 
@@ -486,12 +674,43 @@ class AdaptiveExtractor:
 
     @staticmethod
     def _dedupe(candidates: list[Candidate]) -> list[Candidate]:
-        seen: set[tuple[str, str]] = set()
+        source_priority = {
+            "direct": 100,
+            "json_ld": 90,
+            "json": 85,
+            "json_profile": 85,
+            "open_graph": 80,
+            "image_src": 75,
+            "srcset": 70,
+            "twitter_card": 65,
+            "image_link": 60,
+            "image_element": 50,
+            "script": 40,
+            "css_background": 20,
+        }
+        seen: dict[tuple[str, str], Candidate] = {}
         result: list[Candidate] = []
         for candidate in candidates:
             identity = (candidate.content_type.value, candidate.url or candidate.text)
-            if identity in seen:
+            existing = seen.get(identity)
+            if existing:
+                existing.width = max(existing.width, candidate.width)
+                existing.height = max(existing.height, candidate.height)
+                existing.in_main_content = existing.in_main_content or candidate.in_main_content
+                existing.context_text = " ".join(
+                    dict.fromkeys(
+                        part for part in (existing.context_text, candidate.context_text) if part
+                    )
+                )[:2000]
+                existing.referer = existing.referer or candidate.referer
+                existing.title = existing.title or candidate.title
+                if source_priority.get(candidate.source_kind, 0) > source_priority.get(
+                    existing.source_kind, 0
+                ):
+                    existing.source_kind = candidate.source_kind
+                    existing.selector = candidate.selector
+                    existing.attribute = candidate.attribute
                 continue
-            seen.add(identity)
+            seen[identity] = candidate
             result.append(candidate)
         return result
