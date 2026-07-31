@@ -36,7 +36,8 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch) -> None:
 
     class Component:
         def __init__(self, *args, **kwargs):
-            pass
+            self.args = args
+            self.kwargs = kwargs
 
         @classmethod
         def fromFileSystem(cls, path):
@@ -74,3 +75,26 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     assert module.SmartCollectorPlugin.__name__ == "SmartCollectorPlugin"
+    plugin = module.SmartCollectorPlugin(None, {})
+    source = plugin._temporary_source("https://example.com/page")
+    assert source.content_types == module.CONTENT_PRIORITY
+    assert source.forward_mode == "none"
+    asset = module.CollectedAsset(
+        asset_key="asset",
+        source_key=source.key,
+        source_name=source.name,
+        content_type=module.ContentType.IMAGE,
+        origin_url="https://cdn.example/image.jpg",
+        mime_type="image/jpeg",
+        local_path=ROOT / "image.jpg",
+    )
+    chain = plugin._build_chain(source, asset)
+    assert len(chain) == 1
+    assert type(chain[0]).__name__ == "Image"
+
+    source.forward_mode = "user"
+    forwarded = plugin._build_chain(source, asset, "10001", "用户")
+    assert len(forwarded) == 1
+    assert type(forwarded[0]).__name__ == "Node"
+    assert len(forwarded[0].kwargs["content"]) == 1
+    assert type(forwarded[0].kwargs["content"][0]).__name__ == "Image"

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 
-from smart_collector.config import load_sources, requested_types
+from smart_collector.config import load_sources, requested_types, split_url_request
 from smart_collector.models import (
     CONTENT_PRIORITY,
     ContentType,
@@ -53,7 +53,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.0.2"
+    assert metadata["version"] == "v0.1.0"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -61,6 +61,17 @@ def test_natural_language_type_selection_and_priority() -> None:
     assert requested_types("来个图片", CONTENT_PRIORITY) == (ContentType.IMAGE,)
     assert requested_types("没有明确要求", CONTENT_PRIORITY) == CONTENT_PRIORITY
     assert normalize_types(["视频", "audio", "插画", "text"]) == CONTENT_PRIORITY
+
+
+def test_url_command_request_parsing() -> None:
+    assert split_url_request("图片 https://example.com/a?page=2") == (
+        "https://example.com/a?page=2",
+        "图片",
+    )
+    assert split_url_request("https://example.com/a。 视频") == (
+        "https://example.com/a",
+        "视频",
+    )
 
 
 def test_source_normalization() -> None:

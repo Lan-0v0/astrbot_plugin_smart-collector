@@ -10,7 +10,12 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from .smart_collector.config import DEFAULT_SUMMARY_PROMPT, load_sources, requested_types
+from .smart_collector.config import (
+    DEFAULT_SUMMARY_PROMPT,
+    load_sources,
+    requested_types,
+    split_url_request,
+)
 from .smart_collector.models import (
     CONTENT_PRIORITY,
     CollectedAsset,
@@ -26,7 +31,7 @@ from .smart_collector.schedule import schedule_slot
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.0.2",
+    "v0.1.0",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -58,13 +63,15 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.0.2 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.1.0 已加载，共 %d 个自定义爬取项", len(self.sources))
 
-    @filter.command("采集", alias={"爬取", "抓取"})
+    @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
-        """从已启用的数据源采集内容；可在指令后指定视频、音频、图片或文字。"""
+        """爬取 URL 或已配置数据源；可指定视频、图片、音频或文字。"""
         query = self._after_command(event.message_str)
-        async for result in self._collect_and_reply(event, self.sources, query):
+        url, query = split_url_request(query)
+        sources = [self._temporary_source(url)] if url else self.sources
+        async for result in self._collect_and_reply(event, sources, query):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
@@ -95,6 +102,7 @@ class SmartCollectorPlugin(Star):
         query: str,
         source_name: str = "",
         content_types: list[str] | None = None,
+        url: str = "",
     ) -> MessageEventResult:
         """按用户的自然语言要求，从配置的数据源采集视频、音频、图片或文字。
 
@@ -102,11 +110,16 @@ class SmartCollectorPlugin(Star):
             query(string): 用户对采集内容的自然语言要求
             source_name(string): 可选的数据源名称；留空时并发尝试所有已启用数据源
             content_types(array[string]): 可选内容类型，只能使用 video、audio、image、text
+            url(string): 可选的临时 HTTP/HTTPS 抓取地址；提供后不使用已配置数据源
         """
         if not bool(self.config.get("natural_language_enabled", True)):
             yield event.plain_result("自然语言爬取已在插件配置中关闭。")
             return
-        sources = self._match_sources(source_name)
+        query_url, query = split_url_request(query)
+        target_url = url.strip() or query_url
+        sources = (
+            [self._temporary_source(target_url)] if target_url else self._match_sources(source_name)
+        )
         explicit_types = normalize_types(content_types) if content_types else None
         async for result in self._collect_and_reply(event, sources, query, explicit_types):
             yield result
@@ -187,8 +200,7 @@ class SmartCollectorPlugin(Star):
         sender_id: str = "",
         sender_name: str = "",
     ) -> list:
-        cache_label = "缓存" if asset.cached else "新抓取"
-        content: list = [Comp.Plain(f"[{source.name}] {cache_label}\n")]
+        content: list = []
         path = str(asset.local_path) if asset.local_path else ""
         if asset.mime_type in {"application/pdf", "application/zip"}:
             content.append(Comp.File(name=asset.title or Path(path).name, file=path))
@@ -201,9 +213,6 @@ class SmartCollectorPlugin(Star):
         else:
             text = asset.summary or asset.text
             content.append(Comp.Plain(text[:20_000]))
-        if asset.origin_url:
-            content.append(Comp.Plain(f"\n来源：{asset.origin_url}"))
-
         if source.forward_mode == "none":
             return content
         uin = source.custom_qq if source.forward_mode == "custom" else sender_id
@@ -276,6 +285,21 @@ class SmartCollectorPlugin(Star):
         needle = name.strip().casefold()
         exact = [source for source in enabled if source.name.casefold() == needle]
         return exact or [source for source in enabled if needle in source.name.casefold()]
+
+    @staticmethod
+    def _temporary_source(url: str) -> SourceConfig:
+        return SourceConfig.from_mapping(
+            {
+                "__template_key": "website",
+                "name": "临时 URL",
+                "enabled": True,
+                "url": url,
+                "content_types": [item.value for item in CONTENT_PRIORITY],
+                "dedupe": -1,
+                "forward_mode": "none",
+                "rate_limit": -1,
+            }
+        )
 
     @staticmethod
     def _after_command(message: str) -> str:

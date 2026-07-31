@@ -262,6 +262,17 @@ class CacheStore:
         async with self._lock:
             return await asyncio.to_thread(self._cleanup_sync, source_days)
 
+    async def cleanup_all(self, days: int) -> int:
+        if days < 0:
+            return 0
+        async with self._lock:
+            return await asyncio.to_thread(self._cleanup_all_sync, days)
+
+    def _cleanup_all_sync(self, days: int) -> int:
+        assert self._conn is not None
+        rows = self._conn.execute("SELECT DISTINCT source_key FROM assets").fetchall()
+        return self._cleanup_sync({str(row["source_key"]): days for row in rows})
+
     def _cleanup_sync(self, source_days: dict[str, int]) -> int:
         assert self._conn is not None
         removed = 0
@@ -275,13 +286,18 @@ class CacheStore:
                 (source_key, cutoff),
             ).fetchall()
             for row in rows:
-                if row["local_path"]:
-                    with suppress(OSError):
-                        Path(row["local_path"]).unlink(missing_ok=True)
                 for derived in (self.data_dir / "output").glob(f"{row['asset_key']}*"):
                     with suppress(OSError):
                         derived.unlink(missing_ok=True)
                 self._conn.execute("DELETE FROM assets WHERE asset_key = ?", (row["asset_key"],))
+                if row["local_path"]:
+                    still_referenced = self._conn.execute(
+                        "SELECT 1 FROM assets WHERE local_path = ? LIMIT 1",
+                        (row["local_path"],),
+                    ).fetchone()
+                    if not still_referenced:
+                        with suppress(OSError):
+                            Path(row["local_path"]).unlink(missing_ok=True)
                 removed += 1
         self._conn.commit()
         return removed

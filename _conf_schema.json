@@ -32,7 +32,7 @@
     "templates": {
       "website": {
         "name": "网站",
-        "hint": "从网页结构中自适应提取媒体或文字。",
+        "hint": "从网页结构中自适应提取媒体或文字；检测到数字分页时会随机翻页。",
         "display_item": "name",
         "hide_hint_in_list": true,
         "items": {

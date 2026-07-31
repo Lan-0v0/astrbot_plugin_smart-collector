@@ -89,3 +89,35 @@ def test_avbebe_detail_embed_and_packed_player_discovery() -> None:
     assert candidates[0].url == "https://cdn.example/video.m3u8"
     assert candidates[0].referer == "https://player.example/e/42"
     assert profile["mode"] == "html"
+
+
+def test_nextjs_media_urls_are_unescaped_and_other_types_are_preserved() -> None:
+    html = rb"""<html><script>self.__next_f.push(["https:\/\/cdn.example\/movie.mp4?tag=21\\"])</script>
+    <img src="/cover.webp"><audio src="/sound.mp3"></audio></html>"""
+    candidates, _ = AdaptiveExtractor().extract(
+        response(html, "text/html", "https://example.com/all"),
+        (ContentType.VIDEO, ContentType.IMAGE, ContentType.AUDIO),
+    )
+    assert [(item.content_type, item.url) for item in candidates] == [
+        (ContentType.VIDEO, "https://cdn.example/movie.mp4?tag=21"),
+        (ContentType.AUDIO, "https://example.com/sound.mp3"),
+        (ContentType.IMAGE, "https://example.com/cover.webp"),
+    ]
+
+
+def test_random_page_url_preserves_filters_and_uses_discovered_last_page() -> None:
+    class FixedRandom:
+        @staticmethod
+        def randint(start: int, end: int) -> int:
+            assert (start, end) == (1, 7262)
+            return 4321
+
+    listing = response(
+        b"""<a href='/zh-CN/all?sort=favorite&amp;page=2'>2</a>
+        <a href='/zh-CN/all?sort=favorite&amp;page=7262'>last</a>""",
+        "text/html",
+        "https://pektino.com/zh-CN/all",
+    )
+    assert AdaptiveExtractor.random_page_url(listing, FixedRandom()) == (
+        "https://pektino.com/zh-CN/all?sort=favorite&page=4321"
+    )

@@ -16,8 +16,8 @@ class ContentType(str, Enum):
 
 CONTENT_PRIORITY = (
     ContentType.VIDEO,
-    ContentType.AUDIO,
     ContentType.IMAGE,
+    ContentType.AUDIO,
     ContentType.TEXT,
 )
 
@@ -58,7 +58,7 @@ def normalize_types(values: Any) -> tuple[ContentType, ...]:
                 continue
         if item not in result:
             result.append(item)
-    return tuple(result) or (ContentType.VIDEO,)
+    return tuple(item for item in CONTENT_PRIORITY if item in result) or (ContentType.VIDEO,)
 
 
 @dataclass(slots=True)
@@ -131,6 +131,18 @@ class FetchResponse:
     content_type: str
     body: bytes
     headers: dict[str, str] = field(default_factory=dict)
+    transport: str = "httpx"
+
+
+@dataclass(slots=True)
+class DownloadedFile:
+    url: str
+    status: int
+    content_type: str
+    headers: dict[str, str]
+    local_path: Path
+    sha256: str
+    size: int
     transport: str = "httpx"
 
 

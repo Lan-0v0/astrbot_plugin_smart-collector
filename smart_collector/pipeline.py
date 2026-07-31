@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import mimetypes
+import random
 import re
 import time
 import uuid
@@ -34,12 +35,20 @@ class RateLimitError(CollectionError):
 
 
 class CollectorPipeline:
-    def __init__(self, data_dir: Path, *, concurrency: int = -1, timeout: float = -1) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        concurrency: int = -1,
+        timeout: float = -1,
+        rng: random.Random | None = None,
+    ) -> None:
         self.data_dir = data_dir
         self.cache = CacheStore(data_dir)
         self.fetcher = AntiBotFetcher(timeout=timeout, concurrency=concurrency)
         self.extractor = AdaptiveExtractor()
         self.postprocessor = PostProcessor(data_dir / "output")
+        self._rng = rng or random.SystemRandom()
         self._rate_lock = asyncio.Lock()
         self._last_requests: dict[tuple[str, str], float] = {}
 
@@ -93,19 +102,22 @@ class CollectorPipeline:
             response = await self.fetcher.fetch_source(source)
             if response.status >= 400:
                 raise FetchError(f"HTTP {response.status}")
+            if source.template == "website":
+                page_url = self.extractor.random_page_url(response, self._rng)
+                if page_url and page_url != response.url:
+                    try:
+                        paged = await self.fetcher.fetch(
+                            page_url, headers=AntiBotFetcher.source_headers(source)
+                        )
+                        if paged.status < 400:
+                            response = paged
+                    except Exception:
+                        pass
             profile = await self.cache.get_profile(source.key)
             candidates, new_profile = self.extractor.extract(response, allowed_types, profile)
             if new_profile and new_profile != profile:
                 await self.cache.save_profile(source.key, new_profile)
-            if ContentType.VIDEO in allowed_types and not any(
-                item.content_type is ContentType.VIDEO for item in candidates
-            ):
-                candidates.extend(await self._crawl_detail_pages(source, response, allowed_types))
-            if ContentType.VIDEO in allowed_types and not any(
-                item.content_type is ContentType.VIDEO for item in candidates
-            ):
-                candidates.extend(await self._yt_dlp_candidates(source.url))
-            asset = await self._choose_candidate(source, candidates, allowed_types, response)
+            asset = await self._collect_by_priority(source, response, candidates, allowed_types)
         except Exception as exc:
             cached = await self._cached_fallback(source, allowed_types)
             if cached:
@@ -128,22 +140,62 @@ class CollectorPipeline:
             await self.cache.cleanup({source.key: 0})
 
     async def cleanup(self, sources: list[SourceConfig], cache_days: int = 7) -> int:
-        return await self.cache.cleanup({source.key: cache_days for source in sources})
+        return await self.cache.cleanup_all(cache_days)
 
-    async def _choose_candidate(
+    async def _collect_by_priority(
         self,
         source: SourceConfig,
+        source_response: FetchResponse,
         candidates: list[Candidate],
         allowed_types: tuple[ContentType, ...],
-        source_response: FetchResponse,
     ) -> CollectedAsset:
-        ordered: list[Candidate] = []
+        detail_candidates: list[Candidate] | None = None
         for content_type in CONTENT_PRIORITY:
             if content_type not in allowed_types:
                 continue
-            same_type = [item for item in candidates if item.content_type is content_type]
-            ordered.extend(same_type)
-        for candidate in ordered[:100]:
+            asset = await self._try_candidates(
+                source,
+                source_response,
+                [item for item in candidates if item.content_type is content_type],
+            )
+            if asset:
+                return asset
+            if source.template == "website":
+                if detail_candidates is None:
+                    detail_candidates = await self._crawl_detail_pages(
+                        source, source_response, allowed_types
+                    )
+                asset = await self._try_candidates(
+                    source,
+                    source_response,
+                    [item for item in detail_candidates if item.content_type is content_type],
+                )
+                if asset:
+                    return asset
+            if content_type is ContentType.VIDEO:
+                asset = await self._try_candidates(
+                    source,
+                    source_response,
+                    await self._yt_dlp_candidates(source_response.url),
+                )
+                if asset:
+                    return asset
+
+        cached = await self._cached_fallback(source, allowed_types)
+        if cached:
+            return cached
+        raise CollectionError("解析到了页面，但没有符合类型及去重规则的可发送内容")
+
+    async def _try_candidates(
+        self,
+        source: SourceConfig,
+        source_response: FetchResponse,
+        candidates: list[Candidate],
+    ) -> CollectedAsset | None:
+        candidates = list(candidates)
+        self._rng.shuffle(candidates)
+        candidates = await self._prioritize_candidates(source, candidates)
+        for candidate in candidates[:100]:
             direct_dynamic = candidate.selector == "__response__"
             if candidate.url and not direct_dynamic:
                 cached = await self.cache.get_asset_by_origin(source.key, candidate.url)
@@ -157,10 +209,72 @@ class CollectorPipeline:
                 continue
             if await self.cache.is_allowed(source.key, asset.asset_key, source.dedupe):
                 return asset
-        cached = await self._cached_fallback(source, allowed_types)
-        if cached:
-            return cached
-        raise CollectionError("解析到了页面，但没有符合类型及去重规则的可发送内容")
+        return None
+
+    async def _prioritize_candidates(
+        self, source: SourceConfig, candidates: list[Candidate]
+    ) -> list[Candidate]:
+        probe = getattr(self.fetcher, "probe", None)
+        if not callable(probe) or not candidates:
+            return candidates
+        gate = asyncio.Semaphore(12)
+
+        async def inspect(index: int, candidate: Candidate) -> tuple[int, int, int]:
+            if candidate.selector == "__response__":
+                return (0, 0, index)
+            if not candidate.url or candidate.content_type is ContentType.TEXT:
+                return (1, 0, index)
+            async with gate:
+                response = await probe(
+                    candidate.url, headers=self._candidate_headers(source, candidate)
+                )
+                if (
+                    response is not None
+                    and response.status in {401, 403}
+                    and candidate.referer
+                    and urlsplit(candidate.url).hostname != urlsplit(source.url).hostname
+                ):
+                    response = await probe(
+                        candidate.url,
+                        headers=self._candidate_headers(
+                            source, candidate, include_cross_origin_referer=True
+                        ),
+                    )
+            if response is None:
+                return (2, 0, index)
+            try:
+                size = int(response.headers.get("content-length", "0") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            actual_type = self.extractor._mime_type(response.content_type)
+            if 200 <= response.status < 300 and actual_type is candidate.content_type:
+                return (0, size or 2**63, index)
+            if 200 <= response.status < 300:
+                return (1, size, index)
+            if response.status in {401, 403, 405, 429}:
+                return (2, size, index)
+            return (3, size, index)
+
+        inspected = await asyncio.gather(
+            *(inspect(index, candidate) for index, candidate in enumerate(candidates[:100]))
+        )
+        ranked = sorted(zip(inspected, candidates[:100], strict=True), key=lambda item: item[0])
+        return [candidate for _, candidate in ranked] + candidates[100:]
+
+    @staticmethod
+    def _candidate_headers(
+        source: SourceConfig,
+        candidate: Candidate,
+        *,
+        include_cross_origin_referer: bool = False,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        same_origin = urlsplit(candidate.url).hostname == urlsplit(source.url).hostname
+        if same_origin:
+            headers.update(AntiBotFetcher.source_headers(source))
+        if candidate.referer and (same_origin or include_cross_origin_referer):
+            headers["Referer"] = candidate.referer
+        return headers
 
     async def _materialize(
         self,
@@ -178,19 +292,12 @@ class CollectorPipeline:
             body = candidate.text.encode("utf-8")
             mime_type = "text/plain"
             origin_url = source_response.url
-        else:
-            response = (
-                source_response
-                if candidate.selector == "__response__" and candidate.url == source_response.url
-                else await self.fetcher.fetch(
-                    candidate.url,
-                    headers=(
-                        AntiBotFetcher.source_headers(source)
-                        if urlsplit(candidate.url).hostname == urlsplit(source.url).hostname
-                        else None
-                    ),
-                )
-            )
+            content_digest = hashlib.sha256(body).hexdigest()
+            target = self.cache.files_dir / f"{content_digest}.txt"
+            if not target.exists():
+                await asyncio.to_thread(target.write_bytes, body)
+        elif candidate.selector == "__response__" and candidate.url == source_response.url:
+            response = source_response
             if response.status >= 400:
                 raise FetchError(f"资源返回 HTTP {response.status}")
             body = response.body
@@ -201,15 +308,62 @@ class CollectorPipeline:
                 raise CollectionError("资源响应类型与解析类型不一致")
             if "html" in mime_type or "json" in mime_type:
                 raise CollectionError("候选资源不是可下载媒体")
+            content_digest = hashlib.sha256(body).hexdigest()
+            target = self.cache.files_dir / (
+                content_digest + self._extension(origin_url, mime_type, candidate.content_type)
+            )
+            if not target.exists():
+                await asyncio.to_thread(target.write_bytes, body)
+        else:
+            headers = self._candidate_headers(source, candidate)
+            temporary = self.cache.files_dir / f".download-{uuid.uuid4().hex}"
+            try:
+                try:
+                    downloaded = await self.fetcher.download(
+                        candidate.url, temporary, headers=headers
+                    )
+                    if downloaded.status >= 400:
+                        raise FetchError(f"资源返回 HTTP {downloaded.status}")
+                except FetchError:
+                    if (
+                        not candidate.referer
+                        or urlsplit(candidate.url).hostname == urlsplit(source.url).hostname
+                    ):
+                        raise
+                    downloaded = await self.fetcher.download(
+                        candidate.url,
+                        temporary,
+                        headers=self._candidate_headers(
+                            source, candidate, include_cross_origin_referer=True
+                        ),
+                    )
+                if downloaded.status >= 400:
+                    raise FetchError(f"资源返回 HTTP {downloaded.status}")
+                mime_type = downloaded.content_type or candidate.mime_type
+                actual_type = self.extractor._mime_type(mime_type)
+                if actual_type and actual_type is not candidate.content_type:
+                    raise CollectionError("资源响应类型与解析类型不一致")
+                if "html" in mime_type or "json" in mime_type:
+                    raise CollectionError("候选资源不是可下载媒体")
+                origin_url = candidate.url
+                content_digest = downloaded.sha256
+                target = self.cache.files_dir / (
+                    content_digest + self._extension(origin_url, mime_type, candidate.content_type)
+                )
+                if target.exists():
+                    temporary.unlink(missing_ok=True)
+                else:
+                    temporary.replace(target)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
 
-        content_digest = hashlib.sha256(body).hexdigest()
         digest = hashlib.sha256(f"{source.key}:{content_digest}".encode()).hexdigest()
         cached = await self.cache.get_asset(digest)
         if cached:
+            if target != cached.local_path:
+                target.unlink(missing_ok=True)
             return cached
-        extension = self._extension(origin_url, mime_type, candidate.content_type)
-        target = self.cache.files_dir / f"{content_digest}{extension}"
-        await asyncio.to_thread(target.write_bytes, body)
         asset = CollectedAsset(
             asset_key=digest,
             source_key=source.key,
@@ -232,9 +386,7 @@ class CollectorPipeline:
             raise CollectionError("HLS 视频下载需要 yt-dlp") from exc
 
         partial_stem = self.cache.files_dir / f".hls-{uuid.uuid4().hex}"
-        headers = AntiBotFetcher.source_headers(source)
-        if candidate.referer:
-            headers["Referer"] = candidate.referer
+        headers = self._candidate_headers(source, candidate, include_cross_origin_referer=True)
 
         def download() -> Path:
             options = {
@@ -385,6 +537,10 @@ class CollectorPipeline:
         links = self.extractor.extract_links(response)
         if not links:
             return []
+        likely_details = [url for url in links if self.extractor.is_likely_detail_url(url)]
+        links = likely_details or links
+        self._rng.shuffle(links)
+        links = links[:24]
         responses = await asyncio.gather(
             *(
                 self.fetcher.fetch(url, headers=AntiBotFetcher.source_headers(source))
@@ -401,7 +557,7 @@ class CollectorPipeline:
             candidates.extend(extracted)
             for embed_url in self.extractor.extract_embed_links(detail):
                 embed_links.setdefault(embed_url, detail.url)
-        if candidates or not embed_links:
+        if not embed_links:
             return candidates
 
         def embed_score(item: tuple[str, str]) -> tuple[int, int]:

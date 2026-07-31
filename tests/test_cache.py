@@ -30,3 +30,29 @@ def test_cache_and_dedupe_semantics(tmp_path: Path) -> None:
         await store.close()
 
     asyncio.run(scenario())
+
+
+def test_cleanup_preserves_files_referenced_by_another_source(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = CacheStore(tmp_path)
+        await store.initialize()
+        shared = store.files_dir / "shared.mp4"
+        shared.write_bytes(b"video")
+        for source_key in ("source-a", "source-b"):
+            await store.save_asset(
+                CollectedAsset(
+                    asset_key=f"asset-{source_key}",
+                    source_key=source_key,
+                    source_name=source_key,
+                    content_type=ContentType.VIDEO,
+                    origin_url=f"https://example.com/{source_key}.mp4",
+                    local_path=shared,
+                )
+            )
+        assert await store.cleanup({"source-a": 0}) == 1
+        assert shared.exists()
+        assert await store.cleanup_all(0) == 1
+        assert not shared.exists()
+        await store.close()
+
+    asyncio.run(scenario())

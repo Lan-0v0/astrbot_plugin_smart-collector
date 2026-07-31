@@ -4,8 +4,9 @@ import json
 import re
 from collections.abc import Iterable
 from contextlib import suppress
+from html import unescape
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 from jsbeautifier.unpackers import packer
@@ -27,8 +28,11 @@ MIME_PREFIXES = {
 
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>\\]+", re.IGNORECASE)
 SCRIPT_MEDIA_PATTERN = re.compile(
-    r"""["']([^"']+\.(?:m3u8|mp4|webm)(?:\?[^"']*)?)["']""", re.IGNORECASE
+    r"""["']([^"']+\.(?:m3u8|mp4|webm|mov|mkv|mp3|wav|ogg|m4a|flac|aac|jpg|jpeg|png|gif|webp|avif|bmp)(?:\?[^"']*)?)["']""",
+    re.IGNORECASE,
 )
+PAGE_QUERY_KEYS = {"page", "paged", "p", "pg"}
+DETAIL_PATH_MARKERS = ("/movie/", "/video/", "/watch/", "/post/", "/detail/", "/archives/")
 
 
 class AdaptiveExtractor:
@@ -62,7 +66,7 @@ class AdaptiveExtractor:
         return self._extract_html(response, requested, profile)
 
     @staticmethod
-    def extract_links(response: FetchResponse, limit: int = 24) -> list[str]:
+    def extract_links(response: FetchResponse, limit: int = 100) -> list[str]:
         if "html" not in response.content_type:
             return []
         soup = BeautifulSoup(response.body.decode("utf-8", errors="replace"), "lxml")
@@ -80,8 +84,59 @@ class AdaptiveExtractor:
                 and url not in links
             ):
                 links.append(url)
-        links.sort(key=lambda item: "/movie/" not in urlsplit(item).path)
+        links.sort(key=lambda item: not AdaptiveExtractor.is_likely_detail_url(item))
         return links[:limit]
+
+    @staticmethod
+    def is_likely_detail_url(url: str) -> bool:
+        path = urlsplit(url).path.lower()
+        return any(marker in path for marker in DETAIL_PATH_MARKERS)
+
+    @staticmethod
+    def random_page_url(response: FetchResponse, rng: Any) -> str | None:
+        """Infer a numeric pager and choose a random page while preserving its filters."""
+        if "html" not in response.content_type:
+            return None
+        soup = BeautifulSoup(response.body.decode("utf-8", errors="replace"), "lxml")
+        base_host = urlsplit(response.url).hostname
+        query_pages: list[tuple[int, str, str]] = []
+        path_pages: list[tuple[int, str, re.Match[str]]] = []
+        for element in soup.select("a[href]"):
+            href = element.get("href")
+            if not isinstance(href, str):
+                continue
+            url = urljoin(response.url, href)
+            parts = urlsplit(url)
+            if parts.hostname != base_host:
+                continue
+            for key, value in parse_qsl(parts.query, keep_blank_values=True):
+                if key.lower() in PAGE_QUERY_KEYS and value.isdigit() and int(value) > 0:
+                    query_pages.append((int(value), url, key))
+            match = re.search(r"(?i)(/page/)(\d+)(?=/|$)", parts.path)
+            if match and int(match.group(2)) > 0:
+                path_pages.append((int(match.group(2)), url, match))
+
+        if query_pages:
+            max_page, template, page_key = max(query_pages, key=lambda item: item[0])
+            if max_page < 2:
+                return None
+            selected = rng.randint(1, max_page)
+            parts = urlsplit(template)
+            query = [
+                (key, str(selected) if key == page_key else value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            ]
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+        if path_pages:
+            max_page, template, match = max(path_pages, key=lambda item: item[0])
+            if max_page < 2:
+                return None
+            selected = rng.randint(1, max_page)
+            parts = urlsplit(template)
+            path = f"{parts.path[: match.start(2)]}{selected}{parts.path[match.end(2) :]}"
+            return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+        return None
 
     @staticmethod
     def extract_embed_links(response: FetchResponse, limit: int = 16) -> list[str]:
@@ -199,14 +254,6 @@ class AdaptiveExtractor:
                         candidate.selector = item["selector"]
                         candidate.attribute = item.get("attribute", "src")
                         candidates.append(candidate)
-        if candidates:
-            return self._dedupe(candidates), profile or {
-                "mode": "html",
-                "selectors": [],
-                "json_ld_paths": [],
-                "script_media": True,
-            }
-
         selector_profile: list[dict[str, str]] = []
         json_ld_paths: list[dict[str, Any]] = []
         for script in soup.select("script[type='application/ld+json']"):
@@ -233,15 +280,22 @@ class AdaptiveExtractor:
             ("video source[src]", "src", ContentType.VIDEO),
             ("audio[src]", "src", ContentType.AUDIO),
             ("audio source[src]", "src", ContentType.AUDIO),
+            ("video[data-src]", "data-src", ContentType.VIDEO),
+            ("audio[data-src]", "data-src", ContentType.AUDIO),
             ("img[data-original]", "data-original", ContentType.IMAGE),
             ("img[data-src]", "data-src", ContentType.IMAGE),
+            ("img[srcset]", "srcset", ContentType.IMAGE),
             ("img[src]", "src", ContentType.IMAGE),
             ("meta[property='og:video']", "content", ContentType.VIDEO),
             ("meta[property='og:video:url']", "content", ContentType.VIDEO),
+            ("meta[property='og:video:secure_url']", "content", ContentType.VIDEO),
             ("meta[property='og:audio']", "content", ContentType.AUDIO),
             ("meta[property='og:image']", "content", ContentType.IMAGE),
+            ("meta[name='twitter:player:stream']", "content", ContentType.VIDEO),
+            ("meta[name='twitter:image']", "content", ContentType.IMAGE),
             ("a[href]", "href", None),
             ("source[src]", "src", None),
+            ("source[srcset]", "srcset", None),
         )
         for selector, attribute, forced_type in rules:
             if forced_type and forced_type not in requested:
@@ -251,6 +305,9 @@ class AdaptiveExtractor:
                 raw = element.get(attribute, "")
                 if not isinstance(raw, str) or not raw.strip():
                     continue
+                if attribute == "srcset":
+                    entries = [item.strip().split()[0] for item in raw.split(",") if item.strip()]
+                    raw = entries[-1] if entries else ""
                 url = urljoin(response.url, raw.strip())
                 candidate = self._candidate_from_url(url, requested, title, forced_type)
                 if candidate:
@@ -282,7 +339,7 @@ class AdaptiveExtractor:
         requested: tuple[ContentType, ...],
         title: str,
     ) -> list[Candidate]:
-        if ContentType.VIDEO not in requested:
+        if not any(item in requested for item in EXTENSIONS):
             return []
         urls: list[str] = []
         for script in soup.select("script"):
@@ -295,22 +352,21 @@ class AdaptiveExtractor:
                 sources.append(raw)
             for source in sources:
                 for value in SCRIPT_MEDIA_PATTERN.findall(source):
-                    url = urljoin(base_url, value.replace(r"\/", "/"))
+                    url = urljoin(base_url, self._normalize_url(value))
                     if url not in urls:
                         urls.append(url)
         same_host = urlsplit(base_url).hostname
         urls.sort(key=lambda item: urlsplit(item).hostname != same_host)
-        return [
-            Candidate(
-                ContentType.VIDEO,
-                url=url,
-                title=title or self._filename(url),
-                selector="script:media",
-                attribute="packed-or-inline",
-                referer=base_url,
-            )
-            for url in urls
-        ]
+        candidates: list[Candidate] = []
+        for url in urls:
+            candidate = self._candidate_from_url(url, requested, title)
+            if candidate is None:
+                continue
+            candidate.selector = "script:media"
+            candidate.attribute = "packed-or-inline"
+            candidate.referer = base_url
+            candidates.append(candidate)
+        return candidates
 
     @staticmethod
     def _main_text(soup: BeautifulSoup) -> str:
@@ -357,12 +413,21 @@ class AdaptiveExtractor:
         title: str = "",
         forced_type: ContentType | None = None,
     ) -> Candidate | None:
+        url = self._normalize_url(url)
         if not url.startswith(("http://", "https://")):
             return None
         content_type = forced_type or self._url_type(url)
         if content_type is None or content_type not in requested:
             return None
         return Candidate(content_type=content_type, url=url, title=title or self._filename(url))
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        value = unescape(str(url).strip())
+        value = re.sub(r"\\u0026", "&", value, flags=re.IGNORECASE)
+        value = re.sub(r"\\u003d", "=", value, flags=re.IGNORECASE)
+        value = value.replace(r"\/", "/")
+        return value.rstrip("\\")
 
     @staticmethod
     def _url_type(url: str) -> ContentType | None:

@@ -49,11 +49,26 @@ SOURCES = (
         dedupe=-1,
         rate_limit=-1,
     ),
+    SourceConfig(
+        key="live:pektino",
+        template="website",
+        name="Pektino 随机分页视频",
+        enabled=True,
+        url="https://pektino.com/zh-CN/all",
+        content_types=(ContentType.VIDEO,),
+        command="/pektino",
+        dedupe=-1,
+        rate_limit=-1,
+    ),
 )
 
 
-async def main(include_video: bool) -> int:
-    selected = SOURCES if include_video else SOURCES[:2]
+async def main(include_video: bool, include_pektino: bool) -> int:
+    selected = list(SOURCES[:2])
+    if include_video:
+        selected.append(SOURCES[2])
+    if include_pektino:
+        selected.append(SOURCES[3])
     with tempfile.TemporaryDirectory(prefix="smart-collector-live-") as temp:
         pipeline = CollectorPipeline(Path(temp), concurrency=3, timeout=35)
         await pipeline.initialize()
@@ -100,4 +115,8 @@ async def main(include_video: bool) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--include-video", action="store_true", help="同时测试 Avbebe 视频网站")
-    raise SystemExit(asyncio.run(main(parser.parse_args().include_video)))
+    parser.add_argument(
+        "--include-pektino", action="store_true", help="同时测试 Pektino 随机分页视频"
+    )
+    arguments = parser.parse_args()
+    raise SystemExit(asyncio.run(main(arguments.include_video, arguments.include_pektino)))
