@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -63,12 +64,20 @@ SOURCES = (
 )
 
 
-async def main(include_video: bool, include_pektino: bool) -> int:
-    selected = list(SOURCES[:2])
-    if include_video:
-        selected.append(SOURCES[2])
-    if include_pektino:
-        selected.append(SOURCES[3])
+async def main(
+    include_video: bool,
+    include_pektino: bool,
+    pektino_only: bool,
+    video_quality: str,
+) -> int:
+    if pektino_only:
+        selected = [replace(SOURCES[3], video_quality=video_quality)]
+    else:
+        selected = list(SOURCES[:2])
+        if include_video:
+            selected.append(SOURCES[2])
+        if include_pektino:
+            selected.append(replace(SOURCES[3], video_quality=video_quality))
     with tempfile.TemporaryDirectory(prefix="smart-collector-live-") as temp:
         pipeline = CollectorPipeline(Path(temp), concurrency=3, timeout=35)
         await pipeline.initialize()
@@ -118,5 +127,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--include-pektino", action="store_true", help="同时测试 Pektino 随机分页视频"
     )
+    parser.add_argument("--pektino-only", action="store_true", help="仅测试 Pektino 随机分页视频")
+    parser.add_argument(
+        "--video-quality",
+        choices=("lowest", "highest"),
+        default="lowest",
+        help="Pektino 视频画质偏好",
+    )
     arguments = parser.parse_args()
-    raise SystemExit(asyncio.run(main(arguments.include_video, arguments.include_pektino)))
+    raise SystemExit(
+        asyncio.run(
+            main(
+                arguments.include_video,
+                arguments.include_pektino,
+                arguments.pektino_only,
+                arguments.video_quality,
+            )
+        )
+    )

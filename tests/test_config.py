@@ -38,22 +38,30 @@ def test_schema_contains_required_default_api() -> None:
     assert default["header_value"] == "RgDEYLevGRcMSNIF8z9"
     assert default["content_types"] == ["image"]
     assert default["command"] == "/插画"
+    assert default["forward_mode"] == "none"
     for key in ("summary_provider", "summary_prompt", "cache_days"):
         assert key not in default
     for template in schema["custom_sources"]["templates"].values():
         items = template["items"]
         assert items["dedupe"]["slider"] == {"min": -1, "max": 0, "step": 1}
+        assert items["video_quality"]["default"] == "lowest"
+        assert items["forward_mode"]["default"] == "user"
+        assert items["target_qq_groups"]["default"] == []
+        keys = list(items)
+        assert keys.index("video_quality") == keys.index("dedupe") + 1
+        assert keys.index("target_qq_groups") == keys.index("schedule_time") + 1
         for key in ("summary_provider", "summary_prompt", "cache_days"):
             assert key not in items
     source = load_sources({"custom_sources": [default]})[0]
     assert source.headers == {"key": "RgDEYLevGRcMSNIF8z9"}
     assert source.content_types == (ContentType.IMAGE,)
+    assert source.forward_mode == "none"
 
 
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.1.0"
+    assert metadata["version"] == "v0.1.1"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -83,10 +91,14 @@ def test_source_normalization() -> None:
             "content_types": ["image"],
             "command": "图片",
             "cookies": ["a=1", "b=2"],
+            "video_quality": "highest",
+            "target_qq_groups": [123456, "123456", "bad", " 654321 "],
         }
     )
     assert source.command == "/图片"
     assert source.cookies == ("a=1", "b=2")
+    assert source.video_quality == "highest"
+    assert source.target_qq_groups == ("123456", "654321")
     assert source.key.startswith("website:示例:")
     assert normalize_time("7:05") == "07:05"
     assert normalize_time("25:00") == "23:00"

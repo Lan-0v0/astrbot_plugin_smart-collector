@@ -61,6 +61,10 @@ def normalize_types(values: Any) -> tuple[ContentType, ...]:
     return tuple(item for item in CONTENT_PRIORITY if item in result) or (ContentType.VIDEO,)
 
 
+def normalize_video_quality(value: Any) -> str:
+    return "highest" if str(value).strip().lower() == "highest" else "lowest"
+
+
 @dataclass(slots=True)
 class SourceConfig:
     key: str
@@ -71,6 +75,7 @@ class SourceConfig:
     content_types: tuple[ContentType, ...]
     command: str
     dedupe: int = 0
+    video_quality: str = "lowest"
     cookies: tuple[str, ...] = ()
     headers: dict[str, str] = field(default_factory=dict)
     image_to_pdf: bool = False
@@ -81,6 +86,7 @@ class SourceConfig:
     rate_limit: float = 1.0
     schedules: tuple[str, ...] = ()
     schedule_time: str = "23:00"
+    target_qq_groups: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
@@ -101,6 +107,9 @@ class SourceConfig:
         cookies = value.get("cookies") or []
         if isinstance(cookies, str):
             cookies = [cookies]
+        target_qq_groups = value.get("target_qq_groups") or []
+        if isinstance(target_qq_groups, (str, int)):
+            target_qq_groups = [target_qq_groups]
 
         return cls(
             key=f"{template}:{name}:{hashlib.sha1(str(value.get('url') or '').encode()).hexdigest()[:10]}",
@@ -111,6 +120,7 @@ class SourceConfig:
             content_types=normalize_types(value.get("content_types")),
             command=command,
             dedupe=int(value.get("dedupe", 0)),
+            video_quality=normalize_video_quality(value.get("video_quality")),
             cookies=tuple(str(item).strip() for item in cookies if str(item).strip()),
             headers=headers,
             image_to_pdf=bool(value.get("image_to_pdf", False)),
@@ -121,6 +131,11 @@ class SourceConfig:
             rate_limit=float(value.get("rate_limit", 1.0)),
             schedules=tuple(str(item) for item in (value.get("schedules") or [])),
             schedule_time=normalize_time(value.get("schedule_time")),
+            target_qq_groups=tuple(
+                dict.fromkeys(
+                    str(item).strip() for item in target_qq_groups if str(item).strip().isdigit()
+                )
+            ),
         )
 
 
@@ -156,6 +171,8 @@ class Candidate:
     selector: str = ""
     attribute: str = ""
     referer: str = ""
+    width: int = 0
+    height: int = 0
 
 
 @dataclass(slots=True)

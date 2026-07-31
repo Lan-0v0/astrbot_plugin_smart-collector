@@ -419,7 +419,14 @@ class AdaptiveExtractor:
         content_type = forced_type or self._url_type(url)
         if content_type is None or content_type not in requested:
             return None
-        return Candidate(content_type=content_type, url=url, title=title or self._filename(url))
+        width, height = self._url_resolution(url)
+        return Candidate(
+            content_type=content_type,
+            url=url,
+            title=title or self._filename(url),
+            width=width,
+            height=height,
+        )
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -436,6 +443,15 @@ class AdaptiveExtractor:
             if path.endswith(extensions):
                 return content_type
         return None
+
+    @staticmethod
+    def _url_resolution(url: str) -> tuple[int, int]:
+        decoded = unescape(url)
+        dimensions = re.search(r"(?<!\d)(\d{2,5})[xX](\d{2,5})(?!\d)", decoded)
+        if dimensions:
+            return int(dimensions.group(1)), int(dimensions.group(2))
+        height = re.search(r"(?<!\d)(\d{3,4})p(?!\w)", decoded, re.IGNORECASE)
+        return (0, int(height.group(1))) if height else (0, 0)
 
     @staticmethod
     def _mime_type(mime_type: str) -> ContentType | None:

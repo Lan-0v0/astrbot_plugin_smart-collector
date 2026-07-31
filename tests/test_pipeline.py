@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import sys
+import types
 from pathlib import Path
 
 from smart_collector.models import (
@@ -398,6 +400,92 @@ def test_cross_origin_download_retries_with_referer_after_unauthorized(
         await pipeline.cache.close()
 
     asyncio.run(scenario())
+
+
+def test_video_quality_orders_known_resolutions_and_unknown_sizes(tmp_path: Path) -> None:
+    class QualityFetcher:
+        async def probe(self, url: str, *, headers=None) -> FetchResponse:
+            size = {
+                "https://cdn.example/unknown-small.mp4": 100,
+                "https://cdn.example/unknown-large.mp4": 1000,
+            }.get(url, 500)
+            return FetchResponse(
+                url=url,
+                status=200,
+                content_type="video/mp4",
+                body=b"",
+                headers={"content-length": str(size)},
+            )
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.fetcher.close()
+        pipeline.fetcher = QualityFetcher()  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:quality",
+            template="website",
+            name="Quality",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.VIDEO,),
+            command="/quality",
+        )
+        low = Candidate(
+            ContentType.VIDEO, url="https://cdn.example/640x360.mp4", width=640, height=360
+        )
+        high = Candidate(
+            ContentType.VIDEO,
+            url="https://cdn.example/1920x1080.mp4",
+            width=1920,
+            height=1080,
+        )
+        unknown_small = Candidate(ContentType.VIDEO, url="https://cdn.example/unknown-small.mp4")
+        unknown_large = Candidate(ContentType.VIDEO, url="https://cdn.example/unknown-large.mp4")
+        ranked = await pipeline._prioritize_candidates(
+            source, [high, unknown_large, low, unknown_small]
+        )
+        assert ranked == [low, high, unknown_small, unknown_large]
+        source.video_quality = "highest"
+        ranked = await pipeline._prioritize_candidates(
+            source, [low, unknown_small, high, unknown_large]
+        )
+        assert ranked == [high, low, unknown_large, unknown_small]
+
+    asyncio.run(scenario())
+
+
+def test_yt_dlp_quality_falls_back_to_automatic_format(monkeypatch) -> None:
+    requested_formats: list[str | None] = []
+
+    class YoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            requested_formats.append(options.get("format"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, download=False):
+            if self.options.get("format"):
+                raise RuntimeError("preferred format unavailable")
+            return {
+                "url": "https://cdn.example/auto.mp4",
+                "title": "Auto",
+                "width": 1280,
+                "height": 720,
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YoutubeDL))
+    candidates = asyncio.run(
+        CollectorPipeline._yt_dlp_candidates("https://example.com/watch/1", "highest")
+    )
+    assert requested_formats == ["best", None]
+    assert len(candidates) == 1
+    assert candidates[0].url == "https://cdn.example/auto.mp4"
+    assert (candidates[0].width, candidates[0].height) == (1280, 720)
 
 
 def test_pipeline_crawls_video_detail_pages(tmp_path: Path) -> None:

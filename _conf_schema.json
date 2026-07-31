@@ -22,7 +22,7 @@
         "image_to_pdf": false,
         "compress": false,
         "compression_password": "",
-        "forward_mode": "user",
+        "forward_mode": "none",
         "custom_qq": "",
         "rate_limit": 1.0,
         "schedules": [],
@@ -60,6 +60,14 @@
             "slider": {"min": -1, "max": 0, "step": 1},
             "hint": "-1 不启用；0 永不重复。"
           },
+          "video_quality": {
+            "description": "视频画质",
+            "type": "string",
+            "options": ["lowest", "highest"],
+            "labels": ["最低", "最高"],
+            "default": "lowest",
+            "hint": "优先选择指定画质；无法识别或下载失败时自动回退。"
+          },
           "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
           "compression_password": {
@@ -100,6 +108,12 @@
             "type": "string",
             "default": "23:00",
             "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
+          },
+          "target_qq_groups": {
+            "description": "指定发送QQ群",
+            "type": "list",
+            "default": [],
+            "hint": "可添加多个纯数字QQ群号；通过当前启用的 OneBot 适配器定时发送。"
           }
         }
       },
@@ -129,6 +143,14 @@
             "slider": {"min": -1, "max": 0, "step": 1},
             "hint": "-1 不启用；0 永不重复。"
           },
+          "video_quality": {
+            "description": "视频画质",
+            "type": "string",
+            "options": ["lowest", "highest"],
+            "labels": ["最低", "最高"],
+            "default": "lowest",
+            "hint": "优先选择指定画质；无法识别或下载失败时自动回退。"
+          },
           "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
           "compression_password": {
@@ -169,6 +191,12 @@
             "type": "string",
             "default": "23:00",
             "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
+          },
+          "target_qq_groups": {
+            "description": "指定发送QQ群",
+            "type": "list",
+            "default": [],
+            "hint": "可添加多个纯数字QQ群号；通过当前启用的 OneBot 适配器定时发送。"
           }
         }
       }

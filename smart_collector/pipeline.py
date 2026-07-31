@@ -176,7 +176,7 @@ class CollectorPipeline:
                 asset = await self._try_candidates(
                     source,
                     source_response,
-                    await self._yt_dlp_candidates(source_response.url),
+                    await self._yt_dlp_candidates(source_response.url, source.video_quality),
                 )
                 if asset:
                     return asset
@@ -219,11 +219,21 @@ class CollectorPipeline:
             return candidates
         gate = asyncio.Semaphore(12)
 
-        async def inspect(index: int, candidate: Candidate) -> tuple[int, int, int]:
+        def quality_order(candidate: Candidate, size: int) -> tuple[int, int, int]:
+            pixels = candidate.width * candidate.height
+            if not pixels and candidate.height:
+                pixels = candidate.height * candidate.height
+            quality_enabled = candidate.content_type is ContentType.VIDEO
+            prefer_highest = quality_enabled and source.video_quality == "highest"
+            quality_rank = (-pixels if prefer_highest else pixels) if quality_enabled else 0
+            size_rank = -size if prefer_highest else size
+            return int(quality_enabled and not pixels), quality_rank, size_rank
+
+        async def inspect(index: int, candidate: Candidate) -> tuple[int, int, int, int, int]:
             if candidate.selector == "__response__":
-                return (0, 0, index)
+                return (0, 1, 0, 0, index)
             if not candidate.url or candidate.content_type is ContentType.TEXT:
-                return (1, 0, index)
+                return (1, 1, 0, 0, index)
             async with gate:
                 response = await probe(
                     candidate.url, headers=self._candidate_headers(source, candidate)
@@ -241,19 +251,20 @@ class CollectorPipeline:
                         ),
                     )
             if response is None:
-                return (2, 0, index)
+                return (2, *quality_order(candidate, 0), index)
             try:
                 size = int(response.headers.get("content-length", "0") or 0)
             except (TypeError, ValueError):
                 size = 0
             actual_type = self.extractor._mime_type(response.content_type)
+            quality = quality_order(candidate, size)
             if 200 <= response.status < 300 and actual_type is candidate.content_type:
-                return (0, size or 2**63, index)
+                return (0, *quality, index)
             if 200 <= response.status < 300:
-                return (1, size, index)
+                return (1, *quality, index)
             if response.status in {401, 403, 405, 429}:
-                return (2, size, index)
-            return (3, size, index)
+                return (2, *quality, index)
+            return (3, *quality, index)
 
         inspected = await asyncio.gather(
             *(inspect(index, candidate) for index, candidate in enumerate(candidates[:100]))
@@ -389,27 +400,38 @@ class CollectorPipeline:
         headers = self._candidate_headers(source, candidate, include_cross_origin_referer=True)
 
         def download() -> Path:
-            options = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "format": "worst[height>=360]/worst",
-                "outtmpl": str(partial_stem) + ".%(ext)s",
-                "http_headers": headers,
-                "retries": 3,
-                "fragment_retries": 3,
-            }
-            if self.fetcher.timeout is not None:
-                options["socket_timeout"] = self.fetcher.timeout
-            with yt_dlp.YoutubeDL(options) as downloader:
-                info = downloader.extract_info(candidate.url, download=True)
-                prepared = Path(downloader.prepare_filename(info))
-            if prepared.exists():
-                return prepared
-            matches = list(self.cache.files_dir.glob(partial_stem.name + ".*"))
-            if not matches:
-                raise CollectionError("yt-dlp 未生成视频文件")
-            return matches[0]
+            preferred_format = "best" if source.video_quality == "highest" else "worst"
+
+            def run(format_selector: str | None) -> Path:
+                options = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "outtmpl": str(partial_stem) + ".%(ext)s",
+                    "http_headers": headers,
+                    "retries": 3,
+                    "fragment_retries": 3,
+                }
+                if format_selector:
+                    options["format"] = format_selector
+                if self.fetcher.timeout is not None:
+                    options["socket_timeout"] = self.fetcher.timeout
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(candidate.url, download=True)
+                    prepared = Path(downloader.prepare_filename(info))
+                if prepared.exists():
+                    return prepared
+                matches = list(self.cache.files_dir.glob(partial_stem.name + ".*"))
+                if not matches:
+                    raise CollectionError("yt-dlp 未生成视频文件")
+                return matches[0]
+
+            try:
+                return run(preferred_format)
+            except Exception:
+                for partial in self.cache.files_dir.glob(partial_stem.name + ".*"):
+                    partial.unlink(missing_ok=True)
+                return run(None)
 
         downloaded = await asyncio.to_thread(download)
         try:
@@ -490,19 +512,21 @@ class CollectorPipeline:
         }[content_type]
 
     @staticmethod
-    async def _yt_dlp_candidates(url: str) -> list[Candidate]:
+    async def _yt_dlp_candidates(url: str, video_quality: str) -> list[Candidate]:
         try:
             import yt_dlp
         except ImportError:
             return []
 
-        def extract() -> list[Candidate]:
+        def extract_with(format_selector: str | None) -> list[Candidate]:
             options = {
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
                 "noplaylist": False,
             }
+            if format_selector:
+                options["format"] = format_selector
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=False)
             entries = info.get("entries") or [info]
@@ -519,12 +543,18 @@ class CollectorPipeline:
                             title=entry.get("title") or "",
                             mime_type="video/mp4",
                             selector="yt-dlp",
+                            width=int(entry.get("width") or 0),
+                            height=int(entry.get("height") or 0),
                         )
                     )
             return result
 
         try:
-            return await asyncio.to_thread(extract)
+            preferred_format = "best" if video_quality == "highest" else "worst"
+            try:
+                return await asyncio.to_thread(extract_with, preferred_format)
+            except Exception:
+                return await asyncio.to_thread(extract_with, None)
         except Exception:
             return []
 

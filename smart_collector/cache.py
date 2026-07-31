@@ -65,6 +65,13 @@ class CacheStore:
                 last_slot TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(source_key, umo)
             );
+            CREATE TABLE IF NOT EXISTS schedule_state (
+                source_key TEXT NOT NULL,
+                umo TEXT NOT NULL,
+                first_seen REAL NOT NULL,
+                last_slot TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(source_key, umo)
+            );
             """
         )
         conn.commit()
@@ -254,6 +261,43 @@ class CacheStore:
         assert self._conn is not None
         self._conn.execute(
             "UPDATE subscriptions SET last_slot = ? WHERE source_key = ? AND umo = ?",
+            (slot, source_key, umo),
+        )
+        self._conn.commit()
+
+    async def schedule_state(self, source_key: str, umo: str) -> dict[str, Any]:
+        async with self._lock:
+            return await asyncio.to_thread(self._schedule_state_sync, source_key, umo)
+
+    def _schedule_state_sync(self, source_key: str, umo: str) -> dict[str, Any]:
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT * FROM schedule_state WHERE source_key = ? AND umo = ?",
+            (source_key, umo),
+        ).fetchone()
+        if row:
+            return dict(row)
+        first_seen = time.time()
+        self._conn.execute(
+            "INSERT INTO schedule_state(source_key, umo, first_seen) VALUES (?, ?, ?)",
+            (source_key, umo, first_seen),
+        )
+        self._conn.commit()
+        return {
+            "source_key": source_key,
+            "umo": umo,
+            "first_seen": first_seen,
+            "last_slot": "",
+        }
+
+    async def mark_schedule_slot(self, source_key: str, umo: str, slot: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._mark_schedule_slot_sync, source_key, umo, slot)
+
+    def _mark_schedule_slot_sync(self, source_key: str, umo: str, slot: str) -> None:
+        assert self._conn is not None
+        self._conn.execute(
+            "UPDATE schedule_state SET last_slot = ? WHERE source_key = ? AND umo = ?",
             (slot, source_key, umo),
         )
         self._conn.commit()

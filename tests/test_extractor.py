@@ -121,3 +121,13 @@ def test_random_page_url_preserves_filters_and_uses_discovered_last_page() -> No
     assert AdaptiveExtractor.random_page_url(listing, FixedRandom()) == (
         "https://pektino.com/zh-CN/all?sort=favorite&page=4321"
     )
+
+
+def test_video_resolution_is_inferred_from_common_url_patterns() -> None:
+    extractor = AdaptiveExtractor()
+    assert extractor._url_resolution("https://cdn.example/vid/1280x720/movie.mp4") == (
+        1280,
+        720,
+    )
+    assert extractor._url_resolution("https://cdn.example/movie-1080p.mp4") == (0, 1080)
+    assert extractor._url_resolution("https://cdn.example/movie.mp4") == (0, 0)

@@ -52,15 +52,14 @@ AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10
 
 ```text
 /插画
-/爬取 视频
-/爬取 给我一段音频
 /爬取 https://example.com/path
 /爬取 https://example.com/path 图片
 ```
 
-`/爬取` 后提供 URL 时，会把该地址作为临时网站按“视频 → 图片 → 音频 → 文字”抓取；URL
-前后的类型文字会限制目标类型。不提供 URL 时，仍会并发尝试所有已启用的自定义爬取项。
-成功响应只发送抓取到的媒体或文字，不附加数据源名称、缓存状态和来源地址。
+`/爬取` 的规范为 `/爬取 [URL] [类型]`，URL 必须提供，类型可选。它会把该地址作为临时
+网站按“视频 → 图片 → 音频 → 文字”抓取；URL 前后的类型文字会限制目标类型。未提供有效
+URL 时只返回指令规范提示，不会抓取已配置条目。成功响应只发送抓取到的媒体或文字，不附加
+数据源名称、缓存状态和来源地址。
 
 启用“自然语言爬取”后，AstrBot 的 LLM 可调用 `smart_collect`，参数包括需求文字、可选数据源
 名称、可选内容类型和可选临时 URL。
@@ -71,8 +70,11 @@ AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10
 ## 配置说明
 
 配置由 `_conf_schema.json` 驱动。网站模板在“去重”之前提供多项 Cookie；API 模板提供请求头
-键和值。名称由 `display_item` 显示在条目折叠标题下方。并发数、请求超时、文字摘要、摘要人设
-和缓存清理是位于整个自定义爬取项下方的全局设置；并发数和请求超时填写 `-1` 时不限制。
+键和值。“视频画质”优先选择最低或最高分辨率，无法识别或指定格式下载失败时自动回退；
+“指定发送QQ群”可填写多个群号，通过当前第一个启用的 OneBot 适配器按定时设置主动发送，
+无需先在目标群触发插件。名称由 `display_item` 显示在条目折叠标题下方。并发数、请求超时、
+文字摘要、摘要人设和缓存清理是位于整个自定义爬取项下方的全局设置；并发数和请求超时填写
+`-1` 时不限制。
 
 AstrBot v4 当前的 schema 条件只支持“字段严格等于固定值”，不能表达“多选列表非空”或
 “模型提供商非空”。因此定时时间和摘要人设仍会显示；运行时只有周期非空、提供商非空时才
@@ -94,17 +96,17 @@ python -m pip install -r requirements-dev.txt
 python -m pytest
 ruff check .
 ruff format --check .
-python scripts/live_smoke.py
-python scripts/live_smoke.py --include-pektino
+python scripts/live_smoke.py --pektino-only
+python scripts/live_smoke.py --pektino-only --video-quality highest
 ```
 
 联网烟测默认覆盖妖狐 API 和 Mukyu 随机图片；`--include-video` 添加 Avbebe，
-`--include-pektino` 添加 Pektino 随机分页视频。目标站离线、DNS 污染或出口策略阻断会被明确报告为
-外部网络失败，不会被伪装为成功。
+`--include-pektino` 添加 Pektino 随机分页视频；`--pektino-only` 只访问 Pektino，适合快速回归。
+目标站离线、DNS 污染或出口策略阻断会被明确报告为外部网络失败，不会被伪装为成功。
 
 ## 版本
 
-当前版本：`v0.1.0`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.1.1`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

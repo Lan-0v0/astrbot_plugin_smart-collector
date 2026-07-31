@@ -26,12 +26,16 @@ from .smart_collector.models import (
 from .smart_collector.pipeline import CollectionError, CollectorPipeline
 from .smart_collector.schedule import schedule_slot
 
+COLLECT_COMMAND_USAGE = (
+    "爬虫指令规范为：/爬取 [URL] [类型]\n其中URL为必须项，类型（视频/图片/音频/文字）为不必须项"
+)
+
 
 @register(
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.1.0",
+    "v0.1.1",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -63,15 +67,17 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.1.0 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.1.1 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
-        """爬取 URL 或已配置数据源；可指定视频、图片、音频或文字。"""
+        """爬取指定 URL；可指定视频、图片、音频或文字。"""
         query = self._after_command(event.message_str)
         url, query = split_url_request(query)
-        sources = [self._temporary_source(url)] if url else self.sources
-        async for result in self._collect_and_reply(event, sources, query):
+        if not url:
+            yield event.plain_result(COLLECT_COMMAND_USAGE)
+            return
+        async for result in self._collect_and_reply(event, [self._temporary_source(url)], query):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
@@ -231,41 +237,106 @@ class SmartCollectorPlugin(Star):
                     for source in self.sources
                     if source.enabled and source.schedules
                 }
-                for subscription in await self.pipeline.cache.subscriptions():
-                    source = source_map.get(subscription["source_key"])
-                    if not source:
-                        continue
-                    slot = schedule_slot(
-                        now,
-                        source.schedules,
-                        source.schedule_time,
-                        float(subscription["subscribed_at"]),
-                    )
-                    if not slot or subscription["last_slot"] == slot:
-                        continue
-                    try:
-                        asset = await self.pipeline.collect(
-                            source, None, f"schedule:{subscription['umo']}"
+                targets = await self._scheduled_targets(source_map)
+                for source in source_map.values():
+                    due: list[tuple[dict[str, object], str]] = []
+                    for target in targets:
+                        if target["source_key"] != source.key:
+                            continue
+                        slot = schedule_slot(
+                            now,
+                            source.schedules,
+                            source.schedule_time,
+                            float(target["subscribed_at"]),
                         )
-                        await self._summarize(source, asset)
-                        chain = MessageChain(
-                            chain=self._build_chain(
-                                source,
-                                asset,
-                                subscription["sender_id"],
-                                subscription["sender_name"],
-                            )
-                        )
-                        await self.context.send_message(subscription["umo"], chain)
-                        await self.pipeline.mark_sent(source, asset, self.cache_days)
-                        await self.pipeline.cache.mark_slot(source.key, subscription["umo"], slot)
-                    except Exception:
-                        logger.exception("定时采集 %s 发送失败", source.name)
+                        if slot and target["last_slot"] != slot:
+                            due.append((target, slot))
+                    if due:
+                        await self._send_scheduled(source, due)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Smart Collector 定时任务循环异常")
             await asyncio.sleep(20)
+
+    async def _send_scheduled(
+        self,
+        source: SourceConfig,
+        due: list[tuple[dict[str, object], str]],
+    ) -> None:
+        assert self.pipeline is not None
+        try:
+            asset = await self.pipeline.collect(source, None, f"schedule:{source.key}:{due[0][1]}")
+            await self._summarize(source, asset)
+        except Exception:
+            logger.exception("定时采集 %s 抓取失败", source.name)
+            return
+        sent = False
+        for target, slot in due:
+            try:
+                chain = MessageChain(
+                    chain=self._build_chain(
+                        source,
+                        asset,
+                        str(target["sender_id"]),
+                        str(target["sender_name"]),
+                    )
+                )
+                await self.context.send_message(str(target["umo"]), chain)
+                sent = True
+                if target.get("configured_group"):
+                    await self.pipeline.cache.mark_schedule_slot(
+                        source.key, str(target["umo"]), slot
+                    )
+                else:
+                    await self.pipeline.cache.mark_slot(source.key, str(target["umo"]), slot)
+            except Exception:
+                logger.exception("定时采集 %s 向 %s 发送失败", source.name, target["umo"])
+        if sent:
+            await self.pipeline.mark_sent(source, asset, self.cache_days)
+
+    async def _scheduled_targets(
+        self, source_map: dict[str, SourceConfig]
+    ) -> list[dict[str, object]]:
+        assert self.pipeline is not None
+        targets = {
+            (item["source_key"], item["umo"]): item
+            for item in await self.pipeline.cache.subscriptions()
+            if item["source_key"] in source_map
+        }
+        platform_id = self._onebot_platform_id()
+        if not platform_id:
+            return list(targets.values())
+        for source in source_map.values():
+            for group_id in source.target_qq_groups:
+                umo = f"{platform_id}:GroupMessage:{group_id}"
+                key = (source.key, umo)
+                if key in targets:
+                    continue
+                state = await self.pipeline.cache.schedule_state(source.key, umo)
+                targets[key] = {
+                    "source_key": source.key,
+                    "umo": umo,
+                    "sender_id": "",
+                    "sender_name": "",
+                    "subscribed_at": state["first_seen"],
+                    "last_slot": state["last_slot"],
+                    "configured_group": True,
+                }
+        return list(targets.values())
+
+    def _onebot_platform_id(self) -> str:
+        manager = getattr(self.context, "platform_manager", None)
+        for platform in getattr(manager, "platform_insts", ()):
+            try:
+                metadata = platform.meta()
+            except Exception:
+                continue
+            if getattr(metadata, "name", "") == "aiocqhttp":
+                platform_id = str(getattr(metadata, "id", ""))
+                if platform_id:
+                    return platform_id
+        return ""
 
     async def _cleanup_loop(self) -> None:
         assert self.pipeline is not None

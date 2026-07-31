@@ -56,3 +56,18 @@ def test_cleanup_preserves_files_referenced_by_another_source(tmp_path: Path) ->
         await store.close()
 
     asyncio.run(scenario())
+
+
+def test_configured_schedule_state_persists_last_slot(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = CacheStore(tmp_path)
+        await store.initialize()
+        initial = await store.schedule_state("source", "bot:GroupMessage:123")
+        assert initial["last_slot"] == ""
+        await store.mark_schedule_slot("source", "bot:GroupMessage:123", "2026-08-01T23:00")
+        current = await store.schedule_state("source", "bot:GroupMessage:123")
+        assert current["first_seen"] == initial["first_seen"]
+        assert current["last_slot"] == "2026-08-01T23:00"
+        await store.close()
+
+    asyncio.run(scenario())
