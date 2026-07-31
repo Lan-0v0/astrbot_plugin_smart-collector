@@ -135,10 +135,11 @@ class CollectorPipeline:
         try:
             direct_type = self.extractor._url_type(source.url)
             direct_mime = ""
+            direct_url = source.url
             source_probe = getattr(self.fetcher, "probe", None)
             if (
                 direct_type is None
-                and allowed_types in {(ContentType.VIDEO,), (ContentType.IMAGE,)}
+                and allowed_types == (ContentType.VIDEO,)
                 and callable(source_probe)
             ):
                 probe = await source_probe(
@@ -147,6 +148,7 @@ class CollectorPipeline:
                 if probe and 200 <= probe.status < 300:
                     direct_type = self.extractor._mime_type(probe.content_type)
                     direct_mime = probe.content_type
+                    direct_url = probe.url or source.url
             if direct_type in allowed_types:
                 asset = await self._try_candidates(
                     source,
@@ -154,9 +156,10 @@ class CollectorPipeline:
                     [
                         Candidate(
                             direct_type,
-                            url=source.url,
+                            url=direct_url,
                             mime_type=direct_mime,
-                            selector="__source_probe__" if direct_mime else "",
+                            selector="__source_probe__" if direct_mime else "__source_direct__",
+                            referer=source.url if direct_url != source.url else "",
                         )
                     ],
                     query,
@@ -291,7 +294,9 @@ class CollectorPipeline:
                 [
                     candidate.url
                     for candidate in pending_batch
-                    if candidate.url and candidate.selector != "__response__"
+                    if candidate.url
+                    and candidate.selector
+                    not in {"__response__", "__source_probe__", "__source_direct__"}
                 ],
                 source.dedupe,
             )
@@ -299,8 +304,12 @@ class CollectorPipeline:
                 source, pending_batch, query, cached_assets=cached_assets
             )
             for candidate in batch:
-                direct_dynamic = candidate.selector == "__response__"
-                if candidate.url and not direct_dynamic:
+                dynamic_origin = candidate.selector in {
+                    "__response__",
+                    "__source_probe__",
+                    "__source_direct__",
+                }
+                if candidate.url and not dynamic_origin:
                     cached = cached_assets.get(candidate.url)
                     if cached and await self._image_asset_matches(cached, candidate, query):
                         return cached
@@ -321,7 +330,8 @@ class CollectorPipeline:
                     candidate,
                     query,
                     file_validated=(
-                        candidate.content_type is ContentType.IMAGE and not direct_dynamic
+                        candidate.content_type is ContentType.IMAGE
+                        and candidate.selector != "__response__"
                     ),
                 ):
                     return asset
@@ -351,7 +361,7 @@ class CollectorPipeline:
             return int(quality_enabled and not pixels), quality_rank, size_rank
 
         async def inspect(index: int, candidate: Candidate) -> tuple[int, int, int, int, int]:
-            if candidate.selector in {"__response__", "__source_probe__"}:
+            if candidate.selector in {"__response__", "__source_probe__", "__source_direct__"}:
                 return (0, 1, 0, 0, index)
             if not candidate.url or candidate.content_type is ContentType.TEXT:
                 return (1, 1, 0, 0, index)

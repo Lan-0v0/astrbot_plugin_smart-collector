@@ -506,6 +506,121 @@ def test_extensionless_video_uses_probe_then_streaming_download(tmp_path: Path) 
     asyncio.run(scenario())
 
 
+def test_dynamic_direct_media_endpoint_does_not_reuse_origin_cache(tmp_path: Path) -> None:
+    class RandomImageFetcher:
+        def __init__(self) -> None:
+            self.probes = 0
+            self.downloads = 0
+            self.fetch_source_called = False
+
+        async def probe(self, url, *, headers=None):
+            self.probes += 1
+            raise AssertionError("known media extensions must not be probed")
+
+        async def fetch_source(self, source):
+            self.fetch_source_called = True
+            raise AssertionError("dynamic direct images must use streaming download")
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            output = io.BytesIO()
+            color = "red" if self.downloads == 1 else "blue"
+            Image.new("RGB", (64, 64), color).save(output, "PNG")
+            body = output.getvalue()
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "image/png",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = RandomImageFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:random-image",
+            template="website",
+            name="Random image",
+            enabled=True,
+            url="https://images.example/random.png?r18=1",
+            content_types=(ContentType.IMAGE,),
+            command="/image",
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        first = await pipeline.collect(source, None, "user")
+        second = await pipeline.collect(source, None, "user")
+        assert first.asset_key != second.asset_key
+        assert first.local_path and second.local_path
+        assert first.local_path.read_bytes() != second.local_path.read_bytes()
+        assert (fake.probes, fake.downloads) == (0, 2)
+        assert not fake.fetch_source_called
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_extensionless_direct_image_uses_one_fresh_get_per_collection(tmp_path: Path) -> None:
+    class RandomImageFetcher:
+        def __init__(self) -> None:
+            self.probes = 0
+            self.fetches = 0
+            self.downloads = 0
+
+        async def probe(self, url, *, headers=None):
+            self.probes += 1
+            raise AssertionError("image-only sources must not make a separate probe request")
+
+        async def fetch_source(self, source):
+            self.fetches += 1
+            output = io.BytesIO()
+            color = "red" if self.fetches == 1 else "blue"
+            Image.new("RGB", (64, 64), color).save(output, "PNG")
+            return FetchResponse(source.url, 200, "image/png", output.getvalue())
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            raise AssertionError("the fetched image response must be materialized directly")
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = RandomImageFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:extensionless-random-image",
+            template="website",
+            name="Extensionless random image",
+            enabled=True,
+            url="https://images.example/random?r18=1",
+            content_types=(ContentType.IMAGE,),
+            command="/image",
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        first = await pipeline.collect(source, None, "user")
+        second = await pipeline.collect(source, None, "user")
+        assert first.asset_key != second.asset_key
+        assert (fake.probes, fake.fetches, fake.downloads) == (0, 2, 0)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_video_candidates_are_tried_in_later_batches(tmp_path: Path) -> None:
     class BatchFetcher:
         async def download(self, url, destination, *, headers=None):
