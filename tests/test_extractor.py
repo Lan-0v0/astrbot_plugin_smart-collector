@@ -57,20 +57,35 @@ def test_direct_image_response() -> None:
     assert profile == {"mode": "direct", "content_type": "image"}
 
 
-def test_video_ranking_detail_json_ld_and_link_discovery() -> None:
+def test_avbebe_detail_embed_and_packed_player_discovery() -> None:
     extractor = AdaptiveExtractor()
     listing = response(
-        b"<html><body><a class='block' href='/movie/42'>movie</a></body></html>",
+        b"<html><body><a href='/archives/42'>video</a></body></html>",
         "text/html",
-        "https://twitter-ero-video-ranking.com/",
+        "https://avbebe.com/archives/category/video",
     )
-    assert extractor.extract_links(listing) == ["https://twitter-ero-video-ranking.com/movie/42"]
+    assert extractor.extract_links(listing) == ["https://avbebe.com/archives/42"]
     detail = response(
-        b"""<html><script type="application/ld+json">{"@type":"VideoObject","contentUrl":"https://cdn.example/video?id=42"}</script></html>""",
+        b"""<html><iframe src="https://ads.example/widgets/banner"></iframe>
+        <iframe src="https://player.example/e/42"></iframe></html>""",
         "text/html",
-        "https://twitter-ero-video-ranking.com/movie/42",
+        "https://avbebe.com/archives/42",
     )
-    candidates, profile = extractor.extract(detail, (ContentType.VIDEO,))
+    assert extractor.extract_embed_links(detail) == [
+        "https://player.example/e/42",
+        "https://ads.example/widgets/banner",
+    ]
+    packed = rb"""<html><script>eval(function(p,a,c,k,e,d){e=function(c){return
+        c.toString(a)};if(!''.replace(/^/,String)){while(c--){d[c.toString(a)]=k[c]||
+        c.toString(a)}k=[function(e){return d[e]}];e=function(){return'\w+'};c=1};
+        while(c--){if(k[c]){p=p.replace(new RegExp('\b'+e(c)+'\b','g'),k[c])}}
+        return p}('0="1";',2,2,'src|https://cdn.example/video.m3u8'.split('|'),0,{}))
+        </script></html>"""
+    candidates, profile = extractor.extract(
+        response(packed, "text/html", "https://player.example/e/42"),
+        (ContentType.VIDEO,),
+    )
     assert candidates[0].content_type is ContentType.VIDEO
-    assert candidates[0].url == "https://cdn.example/video?id=42"
+    assert candidates[0].url == "https://cdn.example/video.m3u8"
+    assert candidates[0].referer == "https://player.example/e/42"
     assert profile["mode"] == "html"

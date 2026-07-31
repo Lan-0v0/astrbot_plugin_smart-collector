@@ -149,6 +149,7 @@ class Candidate:
     mime_type: str = ""
     selector: str = ""
     attribute: str = ""
+    referer: str = ""
 
 
 @dataclass(slots=True)

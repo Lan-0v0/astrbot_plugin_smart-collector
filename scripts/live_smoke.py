@@ -41,9 +41,9 @@ SOURCES = (
     SourceConfig(
         key="live:video",
         template="website",
-        name="Twitter Ero Video Ranking",
+        name="Avbebe H 动画影片",
         enabled=True,
-        url="https://twitter-ero-video-ranking.com",
+        url="https://avbebe.com/archives/category/h%e5%8b%95%e7%95%ab%e5%bd%b1%e7%89%87",
         content_types=(ContentType.VIDEO,),
         command="/video",
         dedupe=-1,
@@ -75,6 +75,12 @@ async def main(include_video: bool) -> int:
                             image.verify()
                     except Exception:
                         verified = False
+                if verified and result.content_type is ContentType.VIDEO and result.local_path:
+                    verified = (
+                        result.local_path.stat().st_size > 1024
+                        and result.local_path.suffix.lower() not in {".m3u8", ".txt"}
+                        and result.mime_type.startswith("video/")
+                    )
                 report.append(
                     {
                         "source": source.name,
@@ -93,5 +99,5 @@ async def main(include_video: bool) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--include-video", action="store_true", help="同时测试视频排行网站")
+    parser.add_argument("--include-video", action="store_true", help="同时测试 Avbebe 视频网站")
     raise SystemExit(asyncio.run(main(parser.parse_args().include_video)))

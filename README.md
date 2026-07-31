@@ -87,7 +87,7 @@ ruff format --check .
 python scripts/live_smoke.py
 ```
 
-联网烟测覆盖妖狐 API、Mukyu 随机图片和视频排行网站。目标站离线、DNS 污染或出口策略阻断
+联网烟测覆盖妖狐 API、Mukyu 随机图片和 Avbebe H 动画影片分类。目标站离线、DNS 污染或出口策略阻断
 会被明确报告为外部网络失败，不会被伪装为成功。
 
 ## 版本

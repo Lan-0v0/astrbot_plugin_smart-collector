@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
+from jsbeautifier.unpackers import packer
 
 from .models import Candidate, ContentType, FetchResponse
 
@@ -24,6 +26,9 @@ MIME_PREFIXES = {
 }
 
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>\\]+", re.IGNORECASE)
+SCRIPT_MEDIA_PATTERN = re.compile(
+    r"""["']([^"']+\.(?:m3u8|mp4|webm)(?:\?[^"']*)?)["']""", re.IGNORECASE
+)
 
 
 class AdaptiveExtractor:
@@ -76,6 +81,32 @@ class AdaptiveExtractor:
             ):
                 links.append(url)
         links.sort(key=lambda item: "/movie/" not in urlsplit(item).path)
+        return links[:limit]
+
+    @staticmethod
+    def extract_embed_links(response: FetchResponse, limit: int = 16) -> list[str]:
+        if "html" not in response.content_type:
+            return []
+        soup = BeautifulSoup(response.body.decode("utf-8", errors="replace"), "lxml")
+        links: list[str] = []
+        for element in soup.select("iframe[src], embed[src]"):
+            raw = element.get("src")
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            url = urljoin(response.url, raw.strip())
+            parts = urlsplit(url)
+            if parts.scheme in {"http", "https"} and parts.hostname and url not in links:
+                links.append(url)
+
+        def embed_score(url: str) -> tuple[int, int]:
+            path = urlsplit(url).path.lower()
+            looks_like_player = any(marker in path for marker in ("/e/", "/embed/", "/player/"))
+            looks_like_ad = any(
+                marker in url.lower() for marker in ("/widgets/", "banner", "creative")
+            )
+            return (not looks_like_player, looks_like_ad)
+
+        links.sort(key=embed_score)
         return links[:limit]
 
     def _extract_json(
@@ -136,6 +167,7 @@ class AdaptiveExtractor:
         soup = BeautifulSoup(response.body.decode(encoding, errors="replace"), "lxml")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
         candidates: list[Candidate] = []
+        candidates.extend(self._extract_script_media(soup, response.url, requested, title))
 
         if profile.get("mode") == "html":
             for script in soup.select("script[type='application/ld+json']"):
@@ -168,7 +200,12 @@ class AdaptiveExtractor:
                         candidate.attribute = item.get("attribute", "src")
                         candidates.append(candidate)
         if candidates:
-            return self._dedupe(candidates), profile
+            return self._dedupe(candidates), profile or {
+                "mode": "html",
+                "selectors": [],
+                "json_ld_paths": [],
+                "script_media": True,
+            }
 
         selector_profile: list[dict[str, str]] = []
         json_ld_paths: list[dict[str, Any]] = []
@@ -237,6 +274,43 @@ class AdaptiveExtractor:
             "selectors": selector_profile,
             "json_ld_paths": json_ld_paths,
         }
+
+    def _extract_script_media(
+        self,
+        soup: BeautifulSoup,
+        base_url: str,
+        requested: tuple[ContentType, ...],
+        title: str,
+    ) -> list[Candidate]:
+        if ContentType.VIDEO not in requested:
+            return []
+        urls: list[str] = []
+        for script in soup.select("script"):
+            raw = script.get_text()
+            sources: list[str] = []
+            if packer.detect(raw):
+                with suppress(Exception):
+                    sources.append(packer.unpack(raw))
+            else:
+                sources.append(raw)
+            for source in sources:
+                for value in SCRIPT_MEDIA_PATTERN.findall(source):
+                    url = urljoin(base_url, value.replace(r"\/", "/"))
+                    if url not in urls:
+                        urls.append(url)
+        same_host = urlsplit(base_url).hostname
+        urls.sort(key=lambda item: urlsplit(item).hostname != same_host)
+        return [
+            Candidate(
+                ContentType.VIDEO,
+                url=url,
+                title=title or self._filename(url),
+                selector="script:media",
+                attribute="packed-or-inline",
+                referer=base_url,
+            )
+            for url in urls
+        ]
 
     @staticmethod
     def _main_text(soup: BeautifulSoup) -> str:

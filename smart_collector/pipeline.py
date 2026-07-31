@@ -5,6 +5,7 @@ import hashlib
 import mimetypes
 import re
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -165,6 +166,12 @@ class CollectorPipeline:
         candidate: Candidate,
         source_response: FetchResponse,
     ) -> CollectedAsset:
+        if (
+            candidate.content_type is ContentType.VIDEO
+            and candidate.url
+            and urlsplit(candidate.url).path.lower().endswith(".m3u8")
+        ):
+            return await self._materialize_hls(source, candidate)
         if candidate.content_type is ContentType.TEXT:
             body = candidate.text.encode("utf-8")
             mime_type = "text/plain"
@@ -215,6 +222,76 @@ class CollectorPipeline:
         )
         await self.cache.save_asset(asset)
         return asset
+
+    async def _materialize_hls(self, source: SourceConfig, candidate: Candidate) -> CollectedAsset:
+        try:
+            import yt_dlp
+        except ImportError as exc:
+            raise CollectionError("HLS 视频下载需要 yt-dlp") from exc
+
+        partial_stem = self.cache.files_dir / f".hls-{uuid.uuid4().hex}"
+        headers = AntiBotFetcher.source_headers(source)
+        if candidate.referer:
+            headers["Referer"] = candidate.referer
+
+        def download() -> Path:
+            options = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "format": "worst[height>=360]/worst",
+                "outtmpl": str(partial_stem) + ".%(ext)s",
+                "http_headers": headers,
+                "retries": 3,
+                "fragment_retries": 3,
+                "socket_timeout": self.fetcher.timeout,
+            }
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(candidate.url, download=True)
+                prepared = Path(downloader.prepare_filename(info))
+            if prepared.exists():
+                return prepared
+            matches = list(self.cache.files_dir.glob(partial_stem.name + ".*"))
+            if not matches:
+                raise CollectionError("yt-dlp 未生成视频文件")
+            return matches[0]
+
+        downloaded = await asyncio.to_thread(download)
+        try:
+            content_digest = await asyncio.to_thread(self._file_digest, downloaded)
+            asset_key = hashlib.sha256(f"{source.key}:{content_digest}".encode()).hexdigest()
+            cached = await self.cache.get_asset(asset_key)
+            if cached:
+                downloaded.unlink(missing_ok=True)
+                return cached
+            suffix = downloaded.suffix.lower() or ".mp4"
+            target = self.cache.files_dir / f"{content_digest}{suffix}"
+            if target != downloaded:
+                downloaded.replace(target)
+            asset = CollectedAsset(
+                asset_key=asset_key,
+                source_key=source.key,
+                source_name=source.name,
+                content_type=ContentType.VIDEO,
+                origin_url=candidate.url,
+                title=candidate.title,
+                mime_type=mimetypes.guess_type(target.name)[0] or "video/mp4",
+                local_path=target,
+                cached=False,
+            )
+            await self.cache.save_asset(asset)
+            return asset
+        except Exception:
+            downloaded.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     async def _cached_fallback(
         self, source: SourceConfig, allowed_types: tuple[ContentType, ...]
@@ -313,9 +390,44 @@ class CollectorPipeline:
             return_exceptions=True,
         )
         candidates: list[Candidate] = []
+        embed_links: dict[str, str] = {}
         for detail in responses:
             if isinstance(detail, BaseException) or detail.status >= 400:
                 continue
             extracted, _ = self.extractor.extract(detail, requested)
+            candidates.extend(extracted)
+            for embed_url in self.extractor.extract_embed_links(detail):
+                embed_links.setdefault(embed_url, detail.url)
+        if candidates or not embed_links:
+            return candidates
+
+        def embed_score(item: tuple[str, str]) -> tuple[int, int]:
+            url, _ = item
+            path = urlsplit(url).path.lower()
+            looks_like_player = any(marker in path for marker in ("/e/", "/embed/", "/player/"))
+            looks_like_ad = any(
+                marker in url.lower() for marker in ("/widgets/", "banner", "creative")
+            )
+            return (not looks_like_player, looks_like_ad)
+
+        prioritized_embeds = sorted(embed_links.items(), key=embed_score)[:16]
+
+        embedded = await asyncio.gather(
+            *(
+                self.fetcher.fetch(
+                    url,
+                    headers={
+                        **AntiBotFetcher.source_headers(source),
+                        "Referer": referer,
+                    },
+                )
+                for url, referer in prioritized_embeds
+            ),
+            return_exceptions=True,
+        )
+        for response_item in embedded:
+            if isinstance(response_item, BaseException) or response_item.status >= 400:
+                continue
+            extracted, _ = self.extractor.extract(response_item, requested)
             candidates.extend(extracted)
         return candidates

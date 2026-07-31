@@ -31,16 +31,23 @@ class FakeVideoFetcher:
             url=source.url,
             status=200,
             content_type="text/html",
-            body=b"<html><a class='block' href='/movie/7'>video</a></html>",
+            body=b"<html><a href='/archives/7'>video</a></html>",
         )
 
     async def fetch(self, url: str, *, headers=None) -> FetchResponse:
-        if "/movie/" in url:
+        if url == "https://avbebe.com/archives/7":
             return FetchResponse(
                 url=url,
                 status=200,
                 content_type="text/html",
-                body=b"""<script type="application/ld+json">{"@type":"VideoObject","contentUrl":"https://cdn.example/7.mp4"}</script>""",
+                body=b"<iframe src='https://player.example/e/7'></iframe>",
+            )
+        if url == "https://player.example/e/7":
+            return FetchResponse(
+                url=url,
+                status=200,
+                content_type="text/html",
+                body=b"<script>var source='https://cdn.example/7.mp4';</script>",
             )
         return FetchResponse(url=url, status=200, content_type="video/mp4", body=b"video-data")
 
@@ -88,7 +95,7 @@ def test_pipeline_crawls_video_detail_pages(tmp_path: Path) -> None:
             template="website",
             name="Video",
             enabled=True,
-            url="https://twitter-ero-video-ranking.com",
+            url="https://avbebe.com/archives/category/video",
             content_types=(ContentType.VIDEO,),
             command="/video",
             dedupe=-1,
