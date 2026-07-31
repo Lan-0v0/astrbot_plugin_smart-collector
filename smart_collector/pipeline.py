@@ -34,7 +34,7 @@ class RateLimitError(CollectionError):
 
 
 class CollectorPipeline:
-    def __init__(self, data_dir: Path, *, concurrency: int = 4, timeout: float = 30.0) -> None:
+    def __init__(self, data_dir: Path, *, concurrency: int = -1, timeout: float = -1) -> None:
         self.data_dir = data_dir
         self.cache = CacheStore(data_dir)
         self.fetcher = AntiBotFetcher(timeout=timeout, concurrency=concurrency)
@@ -119,14 +119,16 @@ class CollectorPipeline:
             asset = await self.postprocessor.compress(asset, source.compression_password)
         return asset
 
-    async def mark_sent(self, source: SourceConfig, asset: CollectedAsset) -> None:
+    async def mark_sent(
+        self, source: SourceConfig, asset: CollectedAsset, cache_days: int = 7
+    ) -> None:
         base_key = asset.asset_key.split(":pdf", 1)[0].split(":zip", 1)[0]
         await self.cache.mark_sent(source.key, base_key)
-        if source.cache_days == 0:
+        if cache_days == 0:
             await self.cache.cleanup({source.key: 0})
 
-    async def cleanup(self, sources: list[SourceConfig]) -> int:
-        return await self.cache.cleanup({source.key: source.cache_days for source in sources})
+    async def cleanup(self, sources: list[SourceConfig], cache_days: int = 7) -> int:
+        return await self.cache.cleanup({source.key: cache_days for source in sources})
 
     async def _choose_candidate(
         self,
@@ -244,8 +246,9 @@ class CollectorPipeline:
                 "http_headers": headers,
                 "retries": 3,
                 "fragment_retries": 3,
-                "socket_timeout": self.fetcher.timeout,
             }
+            if self.fetcher.timeout is not None:
+                options["socket_timeout"] = self.fetcher.timeout
             with yt_dlp.YoutubeDL(options) as downloader:
                 info = downloader.extract_info(candidate.url, download=True)
                 prepared = Path(downloader.prepare_filename(info))

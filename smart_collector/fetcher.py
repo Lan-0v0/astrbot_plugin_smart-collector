@@ -49,16 +49,16 @@ class AntiBotFetcher:
     def __init__(
         self,
         *,
-        timeout: float = 30.0,
+        timeout: float = -1,
         max_bytes: int = 100 * 1024 * 1024,
-        concurrency: int = 4,
+        concurrency: int = -1,
     ) -> None:
-        self.timeout = timeout
+        self.timeout = None if timeout < 0 else timeout
         self.max_bytes = max_bytes
-        self._semaphore = asyncio.Semaphore(max(1, concurrency))
+        self._semaphore = asyncio.Semaphore(max(1, concurrency)) if concurrency >= 0 else None
         self._client = httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(timeout),
+            timeout=self.timeout,
             headers=DEFAULT_HEADERS,
             http2=True,
         )
@@ -89,35 +89,40 @@ class AntiBotFetcher:
 
     async def fetch(self, url: str, *, headers: dict[str, str] | None = None) -> FetchResponse:
         self._validate_url(url)
+        if self._semaphore is None:
+            return await self._fetch_with_retries(url, headers or {})
         async with self._semaphore:
-            last_error: Exception | None = None
-            for attempt in range(3):
-                try:
-                    response = await self._httpx_fetch(url, headers or {})
-                    if response.status not in RETRYABLE_STATUS and not self._is_challenge(response):
-                        return response
-                    if attempt == 0:
-                        impersonated = await self._impersonated_fetch(url, headers or {})
-                        if (
-                            impersonated
-                            and impersonated.status < 400
-                            and not self._is_challenge(impersonated)
-                        ):
-                            return impersonated
-                    last_error = FetchError(f"HTTP {response.status}: {url}")
-                except (httpx.HTTPError, OSError, FetchError) as exc:
-                    last_error = exc
-                    if attempt == 0:
-                        impersonated = await self._impersonated_fetch(url, headers or {})
-                        if (
-                            impersonated
-                            and impersonated.status < 400
-                            and not self._is_challenge(impersonated)
-                        ):
-                            return impersonated
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (2**attempt) + random.random() * 0.25)
-            raise FetchError(f"抓取失败 {url}: {last_error!r}") from last_error
+            return await self._fetch_with_retries(url, headers or {})
+
+    async def _fetch_with_retries(self, url: str, headers: dict[str, str]) -> FetchResponse:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self._httpx_fetch(url, headers)
+                if response.status not in RETRYABLE_STATUS and not self._is_challenge(response):
+                    return response
+                if attempt == 0:
+                    impersonated = await self._impersonated_fetch(url, headers)
+                    if (
+                        impersonated
+                        and impersonated.status < 400
+                        and not self._is_challenge(impersonated)
+                    ):
+                        return impersonated
+                last_error = FetchError(f"HTTP {response.status}: {url}")
+            except (httpx.HTTPError, OSError, FetchError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    impersonated = await self._impersonated_fetch(url, headers)
+                    if (
+                        impersonated
+                        and impersonated.status < 400
+                        and not self._is_challenge(impersonated)
+                    ):
+                        return impersonated
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2**attempt) + random.random() * 0.25)
+        raise FetchError(f"抓取失败 {url}: {last_error!r}") from last_error
 
     async def _httpx_fetch(self, url: str, headers: dict[str, str]) -> FetchResponse:
         async with self._client.stream("GET", url, headers=headers) as response:
@@ -141,7 +146,10 @@ class AntiBotFetcher:
         except ImportError:
             return None
         try:
-            async with AsyncSession(impersonate="chrome", timeout=self.timeout) as session:
+            session_options = {"impersonate": "chrome"}
+            if self.timeout is not None:
+                session_options["timeout"] = self.timeout
+            async with AsyncSession(**session_options) as session:
                 response = await session.get(
                     url, headers={**DEFAULT_HEADERS, **headers}, allow_redirects=True
                 )

@@ -26,13 +26,16 @@ from .smart_collector.schedule import schedule_slot
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.0.1",
+    "v0.0.2",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
         self.config = config
         self.sources = load_sources(config)
+        self.summary_provider = str(config.get("summary_provider") or "")
+        self.summary_prompt = str(config.get("summary_prompt") or DEFAULT_SUMMARY_PROMPT)
+        self.cache_days = int(config.get("cache_days", 7))
         self.pipeline: CollectorPipeline | None = None
         self._tasks: list[asyncio.Task] = []
 
@@ -40,8 +43,8 @@ class SmartCollectorPlugin(Star):
         data_dir = StarTools.get_data_dir("astrbot_plugin_smart_collector")
         self.pipeline = CollectorPipeline(
             data_dir,
-            concurrency=int(self.config.get("concurrency", 4)),
-            timeout=float(self.config.get("request_timeout", 30)),
+            concurrency=int(self.config.get("concurrency", -1)),
+            timeout=float(self.config.get("request_timeout", -1)),
         )
         await self.pipeline.initialize()
         if not bool(self.config.get("natural_language_enabled", True)):
@@ -55,7 +58,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.0.1 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.0.2 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("采集", alias={"爬取", "抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -154,7 +157,7 @@ class SmartCollectorPlugin(Star):
                     event.get_sender_name(),
                 )
             yield result
-            await self.pipeline.mark_sent(source, asset)
+            await self.pipeline.mark_sent(source, asset, self.cache_days)
         except CollectionError as exc:
             yield event.plain_result(str(exc))
         except Exception as exc:
@@ -164,15 +167,14 @@ class SmartCollectorPlugin(Star):
     async def _summarize(self, source: SourceConfig, asset: CollectedAsset) -> None:
         if (
             asset.content_type is not ContentType.TEXT
-            or not source.summary_provider
+            or not self.summary_provider
             or not asset.text
         ):
             return
-        prompt = source.summary_prompt or DEFAULT_SUMMARY_PROMPT
         try:
             response = await self.context.llm_generate(
-                chat_provider_id=source.summary_provider,
-                prompt=f"{prompt}\n\n<原文>\n{asset.text[:100_000]}\n</原文>",
+                chat_provider_id=self.summary_provider,
+                prompt=f"{self.summary_prompt}\n\n<原文>\n{asset.text[:100_000]}\n</原文>",
             )
             asset.summary = response.completion_text.strip()
         except Exception:
@@ -246,7 +248,7 @@ class SmartCollectorPlugin(Star):
                             )
                         )
                         await self.context.send_message(subscription["umo"], chain)
-                        await self.pipeline.mark_sent(source, asset)
+                        await self.pipeline.mark_sent(source, asset, self.cache_days)
                         await self.pipeline.cache.mark_slot(source.key, subscription["umo"], slot)
                     except Exception:
                         logger.exception("定时采集 %s 发送失败", source.name)
@@ -260,7 +262,7 @@ class SmartCollectorPlugin(Star):
         assert self.pipeline is not None
         while True:
             try:
-                await self.pipeline.cleanup(self.sources)
+                await self.pipeline.cleanup(self.sources, self.cache_days)
             except asyncio.CancelledError:
                 raise
             except Exception:

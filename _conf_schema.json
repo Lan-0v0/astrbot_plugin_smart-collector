@@ -5,18 +5,6 @@
     "default": true,
     "hint": "启用后向 AstrBot 注册 smart_collect LLM 函数工具。"
   },
-  "concurrency": {
-    "description": "并发爬取数",
-    "type": "int",
-    "default": 4,
-    "slider": {"min": 1, "max": 16, "step": 1}
-  },
-  "request_timeout": {
-    "description": "请求超时（秒）",
-    "type": "int",
-    "default": 30,
-    "slider": {"min": 5, "max": 120, "step": 5}
-  },
   "custom_sources": {
     "description": "自定义爬取项",
     "type": "template_list",
@@ -38,10 +26,7 @@
         "custom_qq": "",
         "rate_limit": 1.0,
         "schedules": [],
-        "schedule_time": "23:00",
-        "summary_provider": "",
-        "summary_prompt": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。",
-        "cache_days": 7
+        "schedule_time": "23:00"
       }
     ],
     "templates": {
@@ -72,8 +57,8 @@
             "description": "去重",
             "type": "int",
             "default": 0,
-            "slider": {"min": -1, "max": 100, "step": 1},
-            "hint": "-1 不启用；0 永不重复；正数表示最近多少次内不重复。"
+            "slider": {"min": -1, "max": 0, "step": 1},
+            "hint": "-1 不启用；0 永不重复。"
           },
           "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
@@ -115,25 +100,6 @@
             "type": "string",
             "default": "23:00",
             "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
-          },
-          "summary_provider": {
-            "description": "爬取文字摘要",
-            "type": "string",
-            "default": "",
-            "_special": "select_provider",
-            "hint": "不选则不启用。"
-          },
-          "summary_prompt": {
-            "description": "摘要模型人设",
-            "type": "text",
-            "default": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。"
-          },
-          "cache_days": {
-            "description": "爬取缓存清理（天）",
-            "type": "int",
-            "default": 7,
-            "slider": {"min": -1, "max": 7, "step": 1},
-            "hint": "-1 不清理；0 发送成功后清理；默认 7 天。"
           }
         }
       },
@@ -160,8 +126,8 @@
             "description": "去重",
             "type": "int",
             "default": 0,
-            "slider": {"min": -1, "max": 100, "step": 1},
-            "hint": "-1 不启用；0 永不重复；正数表示最近多少次内不重复。"
+            "slider": {"min": -1, "max": 0, "step": 1},
+            "hint": "-1 不启用；0 永不重复。"
           },
           "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
@@ -203,28 +169,40 @@
             "type": "string",
             "default": "23:00",
             "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
-          },
-          "summary_provider": {
-            "description": "爬取文字摘要",
-            "type": "string",
-            "default": "",
-            "_special": "select_provider",
-            "hint": "不选则不启用。"
-          },
-          "summary_prompt": {
-            "description": "摘要模型人设",
-            "type": "text",
-            "default": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。"
-          },
-          "cache_days": {
-            "description": "爬取缓存清理（天）",
-            "type": "int",
-            "default": 7,
-            "slider": {"min": -1, "max": 7, "step": 1},
-            "hint": "-1 不清理；0 发送成功后清理；默认 7 天。"
           }
         }
       }
     }
+  },
+  "concurrency": {
+    "description": "并发爬取数",
+    "type": "int",
+    "default": -1,
+    "hint": "-1 表示不限制。"
+  },
+  "request_timeout": {
+    "description": "请求超时（秒）",
+    "type": "int",
+    "default": -1,
+    "hint": "-1 表示不限制。"
+  },
+  "summary_provider": {
+    "description": "爬取文字摘要",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "不选则不启用。"
+  },
+  "summary_prompt": {
+    "description": "摘要模型人设",
+    "type": "text",
+    "default": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。"
+  },
+  "cache_days": {
+    "description": "爬取缓存清理（天）",
+    "type": "int",
+    "default": 7,
+    "slider": {"min": -1, "max": 7, "step": 1},
+    "hint": "-1 不清理；0 发送成功后清理；默认 7 天。"
   }
 }

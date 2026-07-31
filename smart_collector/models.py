@@ -81,9 +81,6 @@ class SourceConfig:
     rate_limit: float = 1.0
     schedules: tuple[str, ...] = ()
     schedule_time: str = "23:00"
-    summary_provider: str = ""
-    summary_prompt: str = ""
-    cache_days: int = 7
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
@@ -124,9 +121,6 @@ class SourceConfig:
             rate_limit=float(value.get("rate_limit", 1.0)),
             schedules=tuple(str(item) for item in (value.get("schedules") or [])),
             schedule_time=normalize_time(value.get("schedule_time")),
-            summary_provider=str(value.get("summary_provider") or ""),
-            summary_prompt=str(value.get("summary_prompt") or ""),
-            cache_days=int(value.get("cache_days", 7)),
         )
 
 
