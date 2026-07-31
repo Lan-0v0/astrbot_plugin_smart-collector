@@ -22,8 +22,17 @@ def test_cache_and_dedupe_semantics(tmp_path: Path) -> None:
         await store.save_asset(asset)
         cached = await store.get_asset_by_origin("source", asset.origin_url)
         assert cached and cached.cached and cached.local_path == file_path
+        allowed = await store.get_allowed_assets_by_origins(
+            "source", [asset.origin_url, asset.origin_url], 0
+        )
+        assert list(allowed) == [asset.origin_url]
+        assert allowed[asset.origin_url].cached
         assert await store.is_allowed("source", "asset-a", 0)
         await store.mark_sent("source", "asset-a")
+        assert await store.get_allowed_assets_by_origins("source", [asset.origin_url], 0) == {}
+        assert asset.origin_url in await store.get_allowed_assets_by_origins(
+            "source", [asset.origin_url], -1
+        )
         assert not await store.is_allowed("source", "asset-a", 0)
         assert not await store.is_allowed("source", "asset-a", 1)
         assert await store.is_allowed("source", "asset-a", -1)

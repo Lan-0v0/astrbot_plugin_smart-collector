@@ -234,6 +234,148 @@ def test_pipeline_reuses_cached_media(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_cached_candidate_skips_probe_and_download(tmp_path: Path) -> None:
+    class NoNetworkFetcher:
+        def __init__(self) -> None:
+            self.probes = 0
+            self.downloads = 0
+
+        async def probe(self, url, *, headers=None):
+            self.probes += 1
+            raise AssertionError("cached media must not be probed")
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            raise AssertionError("cached media must not be downloaded")
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = NoNetworkFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:cache-fast-path",
+            template="website",
+            name="Cache fast path",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.VIDEO,),
+            command="/video",
+            dedupe=-1,
+        )
+        media_path = pipeline.cache.files_dir / "cached.mp4"
+        media_path.write_bytes(b"cached-video")
+        cached = CollectedAsset(
+            asset_key="cached-video",
+            source_key=source.key,
+            source_name=source.name,
+            content_type=ContentType.VIDEO,
+            origin_url="https://cdn.example/video.mp4",
+            mime_type="video/mp4",
+            local_path=media_path,
+        )
+        await pipeline.cache.save_asset(cached)
+        asset = await pipeline._try_candidates(
+            source,
+            FetchResponse(source.url, 200, "text/html", b""),
+            [Candidate(ContentType.VIDEO, url=cached.origin_url)],
+        )
+        assert asset and asset.cached
+        assert (fake.probes, fake.downloads) == (0, 0)
+        await pipeline.cache.close()
+
+    asyncio.run(scenario())
+
+
+def test_known_small_image_is_skipped_before_download(tmp_path: Path) -> None:
+    class SmallProbeFetcher:
+        def __init__(self) -> None:
+            self.downloads = 0
+
+        async def probe(self, url, *, headers=None):
+            return FetchResponse(
+                url,
+                200,
+                "image/jpeg",
+                b"",
+                headers={"content-length": str(50 * 1024)},
+            )
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            raise AssertionError("known undersized images must not be downloaded")
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = SmallProbeFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:small-image",
+            template="website",
+            name="Small image",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.IMAGE,),
+            command="/image",
+        )
+        candidate = Candidate(ContentType.IMAGE, url="https://cdn.example/small.jpg")
+        asset = await pipeline._try_candidates(
+            source,
+            FetchResponse(source.url, 200, "text/html", b""),
+            [candidate],
+        )
+        assert asset is None
+        assert candidate.content_length == 50 * 1024
+        assert fake.downloads == 0
+        await pipeline.cache.close()
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_candidates_are_downloaded_only_once(tmp_path: Path) -> None:
+    class FailedFetcher:
+        def __init__(self) -> None:
+            self.downloads = 0
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            destination.write_bytes(b"missing")
+            return DownloadedFile(url, 404, "text/html", {}, destination, "", 7)
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = FailedFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:dedupe-candidates",
+            template="website",
+            name="Dedupe candidates",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.AUDIO,),
+            command="/audio",
+        )
+        url = "https://cdn.example/audio.mp3"
+        asset = await pipeline._try_candidates(
+            source,
+            FetchResponse(source.url, 200, "text/html", b""),
+            [
+                Candidate(ContentType.AUDIO, url=url, source_kind="script"),
+                Candidate(ContentType.AUDIO, url=url, source_kind="html"),
+            ],
+        )
+        assert asset is None
+        assert fake.downloads == 1
+        await pipeline.cache.close()
+
+    asyncio.run(scenario())
+
+
 def test_pipeline_fetches_a_random_discovered_page(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = CollectorPipeline(tmp_path, rng=FixedRandom())  # type: ignore[arg-type]
@@ -729,6 +871,25 @@ def test_video_quality_orders_known_resolutions_and_unknown_sizes(tmp_path: Path
     asyncio.run(scenario())
 
 
+def test_probe_size_uses_range_total_and_ignores_encoded_length() -> None:
+    ranged = FetchResponse(
+        "https://cdn.example/image.jpg",
+        206,
+        "image/jpeg",
+        b"",
+        headers={"content-length": "1", "content-range": "bytes 0-0/250000"},
+    )
+    assert CollectorPipeline._response_size(ranged) == 250_000
+    encoded = FetchResponse(
+        "https://cdn.example/image.jpg",
+        200,
+        "image/jpeg",
+        b"",
+        headers={"content-length": "50000", "content-encoding": "gzip"},
+    )
+    assert CollectorPipeline._response_size(encoded) == 0
+
+
 def test_image_ranking_prefers_relevant_main_content_over_icons_and_ads(
     tmp_path: Path,
 ) -> None:
@@ -1102,6 +1263,72 @@ def test_pipeline_crawls_video_detail_pages(tmp_path: Path) -> None:
         assert asset.exists
         assert asset.content_type is ContentType.VIDEO
         assert asset.origin_url == "https://cdn.example/7.mp4"
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_defers_embed_fetch_when_detail_media_succeeds(tmp_path: Path) -> None:
+    class DirectDetailFetcher:
+        def __init__(self) -> None:
+            self.fetches: list[str] = []
+
+        async def fetch_source(self, source):
+            return FetchResponse(
+                source.url,
+                200,
+                "text/html",
+                b"<a href='/video/1'>video</a>",
+            )
+
+        async def fetch(self, url, *, headers=None):
+            self.fetches.append(url)
+            if url == "https://source.example/video/1":
+                return FetchResponse(
+                    url,
+                    200,
+                    "text/html",
+                    b"<video src='https://cdn.example/direct.mp4'></video>"
+                    b"<iframe src='https://player.example/embed/1'></iframe>",
+                )
+            raise AssertionError("embed page must stay deferred after direct media succeeds")
+
+        async def download(self, url, destination, *, headers=None):
+            body = b"direct-video"
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "video/mp4",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = DirectDetailFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:lazy-embed",
+            template="website",
+            name="Lazy embed",
+            enabled=True,
+            url="https://source.example/list",
+            content_types=(ContentType.VIDEO,),
+            command="/video",
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        asset = await pipeline.collect(source, None, "user")
+        assert asset.origin_url == "https://cdn.example/direct.mp4"
+        assert fake.fetches == ["https://source.example/video/1"]
         await pipeline.close()
 
     asyncio.run(scenario())

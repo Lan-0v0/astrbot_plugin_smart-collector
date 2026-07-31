@@ -5,6 +5,7 @@ import hashlib
 import json
 import random
 import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -60,6 +61,9 @@ class AntiBotFetcher:
         self.timeout = None if timeout < 0 else timeout
         self.max_bytes = max_bytes
         self._semaphore = asyncio.Semaphore(max(1, concurrency)) if concurrency >= 0 else None
+        self._impersonated_max_clients = max(1, concurrency) if concurrency >= 0 else 32
+        self._impersonated_session: Any | None = None
+        self._impersonated_session_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
             follow_redirects=True,
             timeout=self.timeout,
@@ -68,7 +72,31 @@ class AntiBotFetcher:
         )
 
     async def close(self) -> None:
+        session = self._impersonated_session
+        self._impersonated_session = None
+        if session is not None:
+            with suppress(Exception):
+                await session.close()
         await self._client.aclose()
+
+    async def _get_impersonated_session(self) -> Any | None:
+        if self._impersonated_session is not None:
+            return self._impersonated_session
+        async with self._impersonated_session_lock:
+            if self._impersonated_session is not None:
+                return self._impersonated_session
+            try:
+                from curl_cffi.requests import AsyncSession
+            except ImportError:
+                return None
+            session_options = {
+                "impersonate": "chrome",
+                "max_clients": self._impersonated_max_clients,
+            }
+            if self.timeout is not None:
+                session_options["timeout"] = self.timeout
+            self._impersonated_session = AsyncSession(**session_options)
+            return self._impersonated_session
 
     async def fetch_source(self, source: SourceConfig) -> FetchResponse:
         headers = self.source_headers(source)
@@ -264,77 +292,68 @@ class AntiBotFetcher:
             raise
 
     async def _impersonated_fetch(self, url: str, headers: dict[str, str]) -> FetchResponse | None:
-        try:
-            from curl_cffi.requests import AsyncSession
-        except ImportError:
+        session = await self._get_impersonated_session()
+        if session is None:
             return None
+        response = None
         try:
-            session_options = {"impersonate": "chrome"}
-            if self.timeout is not None:
-                session_options["timeout"] = self.timeout
-            async with AsyncSession(**session_options) as session:
-                response = await session.get(
-                    url, headers={**DEFAULT_HEADERS, **headers}, allow_redirects=True
-                )
-                body = bytes(response.content)
-                if len(body) > self.max_bytes:
-                    raise FetchError(f"响应超过 {self.max_bytes} 字节上限")
-                return FetchResponse(
-                    url=str(response.url),
-                    status=int(response.status_code),
-                    content_type=str(response.headers.get("content-type", ""))
-                    .split(";", 1)[0]
-                    .lower(),
-                    body=body,
-                    headers={str(k): str(v) for k, v in response.headers.items()},
-                    transport="curl_cffi",
-                )
+            response = await session.get(
+                url, headers={**DEFAULT_HEADERS, **headers}, allow_redirects=True
+            )
+            body = bytes(response.content)
+            if len(body) > self.max_bytes:
+                raise FetchError(f"响应超过 {self.max_bytes} 字节上限")
+            return FetchResponse(
+                url=str(response.url),
+                status=int(response.status_code),
+                content_type=str(response.headers.get("content-type", "")).split(";", 1)[0].lower(),
+                body=body,
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                transport="curl_cffi",
+            )
         except Exception:
             return None
+        finally:
+            if response is not None:
+                with suppress(Exception):
+                    await response.aclose()
 
     async def _impersonated_download(
         self, url: str, destination: Path, headers: dict[str, str]
     ) -> DownloadedFile | None:
-        try:
-            from curl_cffi.requests import AsyncSession
-        except ImportError:
+        session = await self._get_impersonated_session()
+        if session is None:
             return None
         digest = hashlib.sha256()
         size = 0
         response = None
         try:
-            session_options = {"impersonate": "chrome"}
-            if self.timeout is not None:
-                session_options["timeout"] = self.timeout
-            async with AsyncSession(**session_options) as session:
-                response = await session.get(
-                    url,
-                    headers={**DEFAULT_HEADERS, **headers},
-                    allow_redirects=True,
-                    stream=True,
-                )
-                self._ensure_disk_capacity(destination, response.headers)
-                with destination.open("wb") as stream:
-                    async for chunk in response.aiter_content():
-                        if not chunk:
-                            continue
-                        stream.write(chunk)
-                        digest.update(chunk)
-                        size += len(chunk)
-                        if size % (256 * 1024 * 1024) < len(chunk):
-                            self._ensure_disk_capacity(destination, {})
-                return DownloadedFile(
-                    url=str(response.url),
-                    status=int(response.status_code),
-                    content_type=str(response.headers.get("content-type", ""))
-                    .split(";", 1)[0]
-                    .lower(),
-                    headers={str(k): str(v) for k, v in response.headers.items()},
-                    local_path=destination,
-                    sha256=digest.hexdigest(),
-                    size=size,
-                    transport="curl_cffi",
-                )
+            response = await session.get(
+                url,
+                headers={**DEFAULT_HEADERS, **headers},
+                allow_redirects=True,
+                stream=True,
+            )
+            self._ensure_disk_capacity(destination, response.headers)
+            with destination.open("wb") as stream:
+                async for chunk in response.aiter_content():
+                    if not chunk:
+                        continue
+                    stream.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if size % (256 * 1024 * 1024) < len(chunk):
+                        self._ensure_disk_capacity(destination, {})
+            return DownloadedFile(
+                url=str(response.url),
+                status=int(response.status_code),
+                content_type=str(response.headers.get("content-type", "")).split(";", 1)[0].lower(),
+                headers={str(k): str(v) for k, v in response.headers.items()},
+                local_path=destination,
+                sha256=digest.hexdigest(),
+                size=size,
+                transport="curl_cffi",
+            )
         except Exception:
             destination.unlink(missing_ok=True)
             return None

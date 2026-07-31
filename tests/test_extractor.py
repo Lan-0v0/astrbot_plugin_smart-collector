@@ -89,6 +89,32 @@ def test_direct_image_response() -> None:
     assert profile == {"mode": "direct", "content_type": "image"}
 
 
+def test_text_only_html_skips_media_candidate_scans(monkeypatch) -> None:
+    extractor = AdaptiveExtractor()
+
+    def unexpected_media_scan(*args, **kwargs):
+        raise AssertionError("text-only extraction must not scan media scripts")
+
+    monkeypatch.setattr(extractor, "_extract_script_media", unexpected_media_scan)
+    saved_profile = {
+        "mode": "html",
+        "selectors": [{"selector": "img[src]", "attribute": "src"}],
+    }
+    candidates, profile = extractor.extract(
+        response(
+            b"<html><head><title>Article</title></head><body><main><p>Useful text</p>"
+            b"<img src='/large.jpg'><video src='/movie.mp4'></video></main></body></html>",
+            "text/html",
+            "https://example.com/article",
+        ),
+        (ContentType.TEXT,),
+        saved_profile,
+    )
+    assert len(candidates) == 1
+    assert candidates[0].text == "Useful text"
+    assert profile == saved_profile
+
+
 def test_avbebe_detail_embed_and_packed_player_discovery() -> None:
     extractor = AdaptiveExtractor()
     listing = response(

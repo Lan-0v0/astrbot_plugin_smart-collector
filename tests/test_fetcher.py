@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import curl_cffi.requests
 import httpx
 
 from smart_collector.fetcher import AntiBotFetcher
@@ -94,5 +95,52 @@ def test_probe_falls_back_to_range_get_when_head_is_not_supported() -> None:
             assert requests == [("HEAD", ""), ("GET", "bytes=0-0")]
         finally:
             await fetcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_browser_impersonation_session_is_reused_and_closed(monkeypatch) -> None:
+    sessions = []
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.url = "https://example.com/page"
+            self.status_code = 200
+            self.headers = {"content-type": "text/html"}
+            self.content = b"page"
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, **options) -> None:
+            self.options = options
+            self.closed = False
+            self.requests = 0
+            sessions.append(self)
+
+        async def get(self, *args, **kwargs):
+            self.requests += 1
+            return FakeResponse()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(curl_cffi.requests, "AsyncSession", FakeSession)
+
+    async def scenario() -> None:
+        fetcher = AntiBotFetcher(timeout=8)
+        first = await fetcher._impersonated_fetch("https://example.com/one", {})
+        second = await fetcher._impersonated_fetch("https://example.com/two", {})
+        assert first and second
+        assert len(sessions) == 1
+        assert sessions[0].requests == 2
+        assert sessions[0].options == {
+            "impersonate": "chrome",
+            "max_clients": 32,
+            "timeout": 8,
+        }
+        await fetcher.close()
+        assert sessions[0].closed
 
     asyncio.run(scenario())

@@ -284,6 +284,18 @@ class AdaptiveExtractor:
         encoding = self._encoding(response)
         soup = BeautifulSoup(response.body.decode(encoding, errors="replace"), "lxml")
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        if requested == (ContentType.TEXT,):
+            text = self._main_text(soup)
+            candidates = (
+                [
+                    Candidate(
+                        ContentType.TEXT, text=text, title=title, selector="article, main, body"
+                    )
+                ]
+                if text
+                else []
+            )
+            return candidates, profile
         candidates: list[Candidate] = []
         candidates.extend(self._extract_script_media(soup, response.url, requested, title))
 

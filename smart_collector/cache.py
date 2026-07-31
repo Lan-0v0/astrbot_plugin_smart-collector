@@ -44,6 +44,8 @@ class CacheStore:
                 last_accessed REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_assets_source ON assets(source_key, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_assets_origin
+                ON assets(source_key, origin_url, created_at DESC);
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_key TEXT NOT NULL,
@@ -51,6 +53,7 @@ class CacheStore:
                 sent_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_history_source ON history(source_key, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_history_asset ON history(source_key, asset_key);
             CREATE TABLE IF NOT EXISTS profiles (
                 source_key TEXT PRIMARY KEY,
                 profile_json TEXT NOT NULL,
@@ -90,6 +93,69 @@ class CacheStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_asset_by_origin_sync, source_key, origin_url)
 
+    async def get_allowed_assets_by_origins(
+        self, source_key: str, origin_urls: list[str], dedupe: int
+    ) -> dict[str, CollectedAsset]:
+        unique_urls = list(dict.fromkeys(url for url in origin_urls if url))
+        if not unique_urls:
+            return {}
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_allowed_assets_by_origins_sync,
+                source_key,
+                unique_urls,
+                dedupe,
+            )
+
+    def _get_allowed_assets_by_origins_sync(
+        self, source_key: str, origin_urls: list[str], dedupe: int
+    ) -> dict[str, CollectedAsset]:
+        assert self._conn is not None
+        placeholders = ",".join("?" for _ in origin_urls)
+        rows = self._conn.execute(
+            f"SELECT * FROM assets WHERE source_key = ? AND origin_url IN ({placeholders}) "
+            "ORDER BY created_at DESC",
+            (source_key, *origin_urls),
+        ).fetchall()
+        disallowed = self._history_asset_keys_sync(
+            source_key, dedupe, [str(row["asset_key"]) for row in rows]
+        )
+        assets: dict[str, CollectedAsset] = {}
+        for row in rows:
+            if row["asset_key"] in disallowed or row["origin_url"] in assets:
+                continue
+            path = Path(row["local_path"]) if row["local_path"] else None
+            if path and not path.exists():
+                continue
+            assets[row["origin_url"]] = self._row_to_asset(row, cached=True)
+        return assets
+
+    def _history_asset_keys_sync(
+        self, source_key: str, dedupe: int, asset_keys: list[str]
+    ) -> set[str]:
+        assert self._conn is not None
+        if dedupe < 0 or not asset_keys:
+            return set()
+        if dedupe == 0:
+            result: set[str] = set()
+            for offset in range(0, len(asset_keys), 900):
+                chunk = asset_keys[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT asset_key FROM history WHERE source_key = ? "
+                    f"AND asset_key IN ({placeholders})",
+                    (source_key, *chunk),
+                ).fetchall()
+                result.update(str(row["asset_key"]) for row in rows)
+            return result
+        else:
+            rows = self._conn.execute(
+                "SELECT asset_key FROM history WHERE source_key = ? ORDER BY id DESC LIMIT ?",
+                (source_key, dedupe),
+            ).fetchall()
+        allowed_keys = set(asset_keys)
+        return {str(row["asset_key"]) for row in rows if str(row["asset_key"]) in allowed_keys}
+
     def _get_asset_by_origin_sync(self, source_key: str, origin_url: str) -> CollectedAsset | None:
         assert self._conn is not None
         row = self._conn.execute(
@@ -122,6 +188,27 @@ class CacheStore:
     async def list_assets(self, source_key: str) -> list[CollectedAsset]:
         async with self._lock:
             return await asyncio.to_thread(self._list_assets_sync, source_key)
+
+    async def list_allowed_assets(self, source_key: str, dedupe: int) -> list[CollectedAsset]:
+        async with self._lock:
+            return await asyncio.to_thread(self._list_allowed_assets_sync, source_key, dedupe)
+
+    def _list_allowed_assets_sync(self, source_key: str, dedupe: int) -> list[CollectedAsset]:
+        assert self._conn is not None
+        rows = self._conn.execute(
+            "SELECT * FROM assets WHERE source_key = ? ORDER BY created_at DESC", (source_key,)
+        ).fetchall()
+        disallowed = self._history_asset_keys_sync(
+            source_key, dedupe, [str(row["asset_key"]) for row in rows]
+        )
+        assets: list[CollectedAsset] = []
+        for row in rows:
+            if row["asset_key"] in disallowed:
+                continue
+            path = Path(row["local_path"]) if row["local_path"] else None
+            if not path or path.exists():
+                assets.append(self._row_to_asset(row, cached=True))
+        return assets
 
     def _list_assets_sync(self, source_key: str) -> list[CollectedAsset]:
         assert self._conn is not None

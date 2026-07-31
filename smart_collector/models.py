@@ -200,6 +200,7 @@ class Candidate:
     context_text: str = ""
     source_kind: str = ""
     in_main_content: bool = False
+    content_length: int = 0
 
 
 @dataclass(slots=True)

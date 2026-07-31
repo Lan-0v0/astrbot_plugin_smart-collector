@@ -217,6 +217,8 @@ class CollectorPipeline:
         query: str = "",
     ) -> CollectedAsset:
         detail_candidates: list[Candidate] | None = None
+        detail_embed_links: dict[str, str] = {}
+        embedded_candidates: list[Candidate] | None = None
         for content_type in CONTENT_PRIORITY:
             if content_type not in allowed_types:
                 continue
@@ -230,7 +232,7 @@ class CollectorPipeline:
                 return asset
             if source.template == "website":
                 if detail_candidates is None:
-                    detail_candidates = await self._crawl_detail_pages(
+                    detail_candidates, detail_embed_links = await self._crawl_detail_candidates(
                         source, source_response, allowed_types
                     )
                 asset = await self._try_candidates(
@@ -241,6 +243,19 @@ class CollectorPipeline:
                 )
                 if asset:
                     return asset
+                if embedded_candidates is None and detail_embed_links:
+                    embedded_candidates = await self._crawl_embed_pages(
+                        source, detail_embed_links, allowed_types
+                    )
+                if embedded_candidates:
+                    asset = await self._try_candidates(
+                        source,
+                        source_response,
+                        [item for item in embedded_candidates if item.content_type is content_type],
+                        query,
+                    )
+                    if asset:
+                        return asset
             if content_type is ContentType.VIDEO:
                 asset = await self._try_candidates(
                     source,
@@ -255,9 +270,6 @@ class CollectorPipeline:
                 if asset:
                     return asset
 
-        cached = await self._cached_fallback(source, allowed_types, query)
-        if cached:
-            return cached
         raise CollectionError("解析到了页面，但没有符合类型及去重规则的可发送内容")
 
     async def _try_candidates(
@@ -267,35 +279,61 @@ class CollectorPipeline:
         candidates: list[Candidate],
         query: str = "",
     ) -> CollectedAsset | None:
-        pending = list(candidates)
+        pending = self.extractor._dedupe(list(candidates))
         if pending and all(item.content_type is ContentType.IMAGE for item in pending):
             pending.sort(key=lambda item: self._image_candidate_score(item, query, 0), reverse=True)
         else:
             self._rng.shuffle(pending)
         for offset in range(0, min(len(pending), 300), 100):
-            batch = await self._prioritize_candidates(source, pending[offset : offset + 100], query)
+            pending_batch = pending[offset : offset + 100]
+            cached_assets = await self.cache.get_allowed_assets_by_origins(
+                source.key,
+                [
+                    candidate.url
+                    for candidate in pending_batch
+                    if candidate.url and candidate.selector != "__response__"
+                ],
+                source.dedupe,
+            )
+            batch = await self._prioritize_candidates(
+                source, pending_batch, query, cached_assets=cached_assets
+            )
             for candidate in batch:
                 direct_dynamic = candidate.selector == "__response__"
                 if candidate.url and not direct_dynamic:
-                    cached = await self.cache.get_asset_by_origin(source.key, candidate.url)
-                    if (
-                        cached
-                        and await self.cache.is_allowed(source.key, cached.asset_key, source.dedupe)
-                        and await self._image_asset_matches(cached, candidate, query)
-                    ):
+                    cached = cached_assets.get(candidate.url)
+                    if cached and await self._image_asset_matches(cached, candidate, query):
                         return cached
+                if (
+                    candidate.content_type is ContentType.IMAGE
+                    and self.image_min_bytes >= 0
+                    and 0 < candidate.content_length < self.image_min_bytes
+                ):
+                    continue
                 try:
                     asset = await self._materialize(source, candidate, source_response)
                 except Exception:
                     continue
                 if await self.cache.is_allowed(
                     source.key, asset.asset_key, source.dedupe
-                ) and await self._image_asset_matches(asset, candidate, query):
+                ) and await self._image_asset_matches(
+                    asset,
+                    candidate,
+                    query,
+                    file_validated=(
+                        candidate.content_type is ContentType.IMAGE and not direct_dynamic
+                    ),
+                ):
                     return asset
         return None
 
     async def _prioritize_candidates(
-        self, source: SourceConfig, candidates: list[Candidate], query: str = ""
+        self,
+        source: SourceConfig,
+        candidates: list[Candidate],
+        query: str = "",
+        *,
+        cached_assets: dict[str, CollectedAsset] | None = None,
     ) -> list[Candidate]:
         probe = getattr(self.fetcher, "probe", None)
         if not callable(probe) or not candidates:
@@ -317,34 +355,50 @@ class CollectorPipeline:
                 return (0, 1, 0, 0, index)
             if not candidate.url or candidate.content_type is ContentType.TEXT:
                 return (1, 1, 0, 0, index)
-            async with gate:
-                response = await probe(
-                    candidate.url, headers=self._candidate_headers(source, candidate)
+            cached = (cached_assets or {}).get(candidate.url)
+            if cached and cached.local_path:
+                try:
+                    size = cached.local_path.stat().st_size
+                except OSError:
+                    cached = None
+            if cached:
+                response = FetchResponse(
+                    candidate.url,
+                    200,
+                    cached.mime_type,
+                    b"",
+                    headers={"content-length": str(size)},
+                    transport="cache",
                 )
-                if (
-                    response is not None
-                    and response.status in {401, 403}
-                    and candidate.referer
-                    and urlsplit(candidate.url).hostname != urlsplit(source.url).hostname
-                ):
+            else:
+                async with gate:
                     response = await probe(
-                        candidate.url,
-                        headers=self._candidate_headers(
-                            source, candidate, include_cross_origin_referer=True
-                        ),
+                        candidate.url, headers=self._candidate_headers(source, candidate)
                     )
+                    if (
+                        response is not None
+                        and response.status in {401, 403}
+                        and candidate.referer
+                        and urlsplit(candidate.url).hostname != urlsplit(source.url).hostname
+                    ):
+                        response = await probe(
+                            candidate.url,
+                            headers=self._candidate_headers(
+                                source, candidate, include_cross_origin_referer=True
+                            ),
+                        )
             if response is None:
                 return (2, *quality_order(candidate, 0), index)
             try:
-                size = int(response.headers.get("content-length", "0") or 0)
+                size = self._response_size(response)
             except (TypeError, ValueError):
                 size = 0
+            candidate.content_length = 0 if response.transport == "cache" else max(0, size)
             actual_type = self.extractor._mime_type(response.content_type)
             if candidate.content_type is ContentType.IMAGE:
                 score = self._image_candidate_score(candidate, query, size)
-                below_size_limit = self.image_min_bytes >= 0 and 0 < size < self.image_min_bytes
                 if 200 <= response.status < 300 and actual_type is ContentType.IMAGE:
-                    return (int(below_size_limit), 0, -score, -size, index)
+                    return (0, 0, -score, -size, index)
                 if 200 <= response.status < 300:
                     return (1, 0, -score, -size, index)
                 return (2, 0, -score, -size, index)
@@ -372,6 +426,19 @@ class CollectorPipeline:
             zip(inspected, candidates[:inspection_limit], strict=True), key=lambda item: item[0]
         )
         return [candidate for _, candidate in ranked] + candidates[inspection_limit:]
+
+    @staticmethod
+    def _response_size(response: FetchResponse) -> int:
+        encoding = response.headers.get("content-encoding", "").strip().lower()
+        if encoding not in {"", "identity"}:
+            return 0
+        content_range = response.headers.get("content-range", "")
+        range_total = re.search(r"/(\d+)\s*$", content_range)
+        if range_total:
+            return int(range_total.group(1))
+        if response.status == 206:
+            return 0
+        return int(response.headers.get("content-length", "0") or 0)
 
     @classmethod
     def _image_candidate_score(cls, candidate: Candidate, query: str, size: int) -> int:
@@ -478,20 +545,31 @@ class CollectorPipeline:
         return tuple(dict.fromkeys(positive)), negative, orientation, minimum
 
     async def _image_asset_matches(
-        self, asset: CollectedAsset, candidate: Candidate, query: str
+        self,
+        asset: CollectedAsset,
+        candidate: Candidate,
+        query: str,
+        *,
+        file_validated: bool = False,
     ) -> bool:
         if candidate.content_type is not ContentType.IMAGE:
             return True
-        if not asset.local_path or not asset.local_path.exists():
-            return False
-        try:
-            if self.image_min_bytes >= 0 and asset.local_path.stat().st_size < self.image_min_bytes:
+        if file_validated:
+            width, height = candidate.width, candidate.height
+        else:
+            if not asset.local_path or not asset.local_path.exists():
                 return False
-            width, height = await asyncio.to_thread(self._image_dimensions, asset.local_path)
-        except (OSError, UnidentifiedImageError, ValueError):
-            return False
-        candidate.width = width
-        candidate.height = height
+            try:
+                if (
+                    self.image_min_bytes >= 0
+                    and asset.local_path.stat().st_size < self.image_min_bytes
+                ):
+                    return False
+                width, height = await asyncio.to_thread(self._image_dimensions, asset.local_path)
+            except (OSError, UnidentifiedImageError, ValueError):
+                return False
+            candidate.width = width
+            candidate.height = height
         if width <= 8 or height <= 8 or width * height <= 256:
             return False
         _, _, orientation, minimum = self._image_query_requirements(query)
@@ -760,17 +838,13 @@ class CollectorPipeline:
         allowed_types: tuple[ContentType, ...],
         query: str = "",
     ) -> CollectedAsset | None:
-        assets = await self.cache.list_assets(source.key)
+        assets = await self.cache.list_allowed_assets(source.key, source.dedupe)
         for content_type in CONTENT_PRIORITY:
             if content_type not in allowed_types:
                 continue
             for asset in assets:
-                if (
-                    asset.content_type is content_type
-                    and await self.cache.is_allowed(source.key, asset.asset_key, source.dedupe)
-                    and await self._image_asset_matches(
-                        asset, Candidate(content_type=content_type), query
-                    )
+                if asset.content_type is content_type and await self._image_asset_matches(
+                    asset, Candidate(content_type=content_type), query
                 ):
                     return asset
         return None
@@ -868,9 +942,20 @@ class CollectorPipeline:
         response: FetchResponse,
         requested: tuple[ContentType, ...],
     ) -> list[Candidate]:
+        candidates, embed_links = await self._crawl_detail_candidates(source, response, requested)
+        if embed_links:
+            candidates.extend(await self._crawl_embed_pages(source, embed_links, requested))
+        return self.extractor._dedupe(candidates)
+
+    async def _crawl_detail_candidates(
+        self,
+        source: SourceConfig,
+        response: FetchResponse,
+        requested: tuple[ContentType, ...],
+    ) -> tuple[list[Candidate], dict[str, str]]:
         links = self.extractor.extract_links(response)
         if not links:
-            return []
+            return [], {}
         likely_details = [url for url in links if self.extractor.is_likely_detail_url(url)]
         links = likely_details or links
         self._rng.shuffle(links)
@@ -891,8 +976,16 @@ class CollectorPipeline:
             candidates.extend(extracted)
             for embed_url in self.extractor.extract_embed_links(detail):
                 embed_links.setdefault(embed_url, detail.url)
+        return self.extractor._dedupe(candidates), embed_links
+
+    async def _crawl_embed_pages(
+        self,
+        source: SourceConfig,
+        embed_links: dict[str, str],
+        requested: tuple[ContentType, ...],
+    ) -> list[Candidate]:
         if not embed_links:
-            return candidates
+            return []
 
         def embed_score(item: tuple[str, str]) -> tuple[int, int]:
             url, _ = item
@@ -921,9 +1014,10 @@ class CollectorPipeline:
             ),
             return_exceptions=True,
         )
+        candidates: list[Candidate] = []
         for response_item in embedded:
             if isinstance(response_item, BaseException) or response_item.status >= 400:
                 continue
             extracted, _ = self.extractor.extract(response_item, requested)
             candidates.extend(extracted)
-        return candidates
+        return self.extractor._dedupe(candidates)
