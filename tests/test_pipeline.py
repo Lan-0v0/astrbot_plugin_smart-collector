@@ -376,6 +376,57 @@ def test_duplicate_candidates_are_downloaded_only_once(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_disabled_dedupe_refreshes_reused_video_url(tmp_path: Path) -> None:
+    class RotatingFetcher:
+        def __init__(self) -> None:
+            self.downloads = 0
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads += 1
+            body = f"video-{self.downloads}".encode()
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "video/mp4",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = RotatingFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:rotating-video",
+            template="website",
+            name="Rotating video",
+            enabled=True,
+            url="https://source.example/random",
+            content_types=(ContentType.VIDEO,),
+            command="/rotating",
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        candidate = Candidate(ContentType.VIDEO, url="https://cdn.example/random.mp4")
+        response = FetchResponse(source.url, 200, "text/html", b"")
+        first = await pipeline._try_candidates(source, response, [candidate])
+        second = await pipeline._try_candidates(source, response, [candidate])
+        assert first and second
+        assert first.asset_key != second.asset_key
+        assert fake.downloads == 2
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_pipeline_fetches_a_random_discovered_page(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = CollectorPipeline(tmp_path, rng=FixedRandom())  # type: ignore[arg-type]
