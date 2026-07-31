@@ -20,12 +20,16 @@ def test_schema_contains_required_default_api() -> None:
     assert list(schema) == [
         "natural_language_enabled",
         "custom_sources",
+        "image_ignore_size_kb",
         "concurrency",
         "request_timeout",
         "summary_provider",
         "summary_prompt",
         "cache_days",
     ]
+    assert schema["image_ignore_size_kb"]["default"] == 100
+    assert "slider" not in schema["image_ignore_size_kb"]
+    assert list(schema).index("image_ignore_size_kb") + 1 == list(schema).index("concurrency")
     assert schema["concurrency"]["default"] == -1
     assert "slider" not in schema["concurrency"]
     assert schema["request_timeout"]["default"] == -1
@@ -61,7 +65,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.1.3"
+    assert metadata["version"] == "v0.1.4"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 

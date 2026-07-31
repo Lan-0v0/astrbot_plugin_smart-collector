@@ -202,6 +202,12 @@
       }
     }
   },
+  "image_ignore_size_kb": {
+    "description": "图片爬取忽略尺寸（KB）",
+    "type": "int",
+    "default": 100,
+    "hint": "忽略实际文件小于该大小的图片；单位 KB，-1 表示不启用。"
+  },
   "concurrency": {
     "description": "并发爬取数",
     "type": "int",

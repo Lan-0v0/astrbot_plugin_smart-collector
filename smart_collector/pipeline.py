@@ -68,11 +68,13 @@ class CollectorPipeline:
         self,
         data_dir: Path,
         *,
+        image_ignore_size_kb: int = 100,
         concurrency: int = -1,
         timeout: float = -1,
         rng: random.Random | None = None,
     ) -> None:
         self.data_dir = data_dir
+        self.image_min_bytes = -1 if image_ignore_size_kb < 0 else image_ignore_size_kb * 1024
         self.cache = CacheStore(data_dir)
         self.fetcher = AntiBotFetcher(timeout=timeout, concurrency=concurrency)
         self.extractor = AdaptiveExtractor()
@@ -340,8 +342,9 @@ class CollectorPipeline:
             actual_type = self.extractor._mime_type(response.content_type)
             if candidate.content_type is ContentType.IMAGE:
                 score = self._image_candidate_score(candidate, query, size)
+                below_size_limit = self.image_min_bytes >= 0 and 0 < size < self.image_min_bytes
                 if 200 <= response.status < 300 and actual_type is ContentType.IMAGE:
-                    return (0, 0, -score, -size, index)
+                    return (int(below_size_limit), 0, -score, -size, index)
                 if 200 <= response.status < 300:
                     return (1, 0, -score, -size, index)
                 return (2, 0, -score, -size, index)
@@ -474,23 +477,24 @@ class CollectorPipeline:
                 positive.extend(chunk[index : index + 2] for index in range(len(chunk) - 1))
         return tuple(dict.fromkeys(positive)), negative, orientation, minimum
 
-    @classmethod
     async def _image_asset_matches(
-        cls, asset: CollectedAsset, candidate: Candidate, query: str
+        self, asset: CollectedAsset, candidate: Candidate, query: str
     ) -> bool:
         if candidate.content_type is not ContentType.IMAGE:
             return True
         if not asset.local_path or not asset.local_path.exists():
             return False
         try:
-            width, height = await asyncio.to_thread(cls._image_dimensions, asset.local_path)
+            if self.image_min_bytes >= 0 and asset.local_path.stat().st_size < self.image_min_bytes:
+                return False
+            width, height = await asyncio.to_thread(self._image_dimensions, asset.local_path)
         except (OSError, UnidentifiedImageError, ValueError):
             return False
         candidate.width = width
         candidate.height = height
         if width <= 8 or height <= 8 or width * height <= 256:
             return False
-        _, _, orientation, minimum = cls._image_query_requirements(query)
+        _, _, orientation, minimum = self._image_query_requirements(query)
         if minimum and (width < minimum[0] or height < minimum[1]):
             return False
         if orientation == "landscape" and width <= height:
@@ -557,6 +561,12 @@ class CollectorPipeline:
                 raise CollectionError("资源响应类型与解析类型不一致")
             if "html" in mime_type or "json" in mime_type:
                 raise CollectionError("候选资源不是可下载媒体")
+            if (
+                candidate.content_type is ContentType.IMAGE
+                and self.image_min_bytes >= 0
+                and len(body) < self.image_min_bytes
+            ):
+                raise FetchError(f"候选图片小于 {self.image_min_bytes // 1024} KB 忽略阈值")
             content_digest = hashlib.sha256(body).hexdigest()
             target = self.cache.files_dir / (
                 content_digest + self._extension(origin_url, mime_type, candidate.content_type)
@@ -577,6 +587,9 @@ class CollectorPipeline:
                 if "html" in current_mime or "json" in current_mime:
                     raise FetchError("候选资源不是可下载媒体")
                 if candidate.content_type is ContentType.IMAGE:
+                    actual_size = downloaded.local_path.stat().st_size
+                    if self.image_min_bytes >= 0 and actual_size < self.image_min_bytes:
+                        raise FetchError(f"候选图片小于 {self.image_min_bytes // 1024} KB 忽略阈值")
                     try:
                         width, height = await asyncio.to_thread(
                             self._image_dimensions, downloaded.local_path

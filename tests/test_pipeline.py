@@ -207,7 +207,7 @@ class FakeFallbackFetcher:
 
 def test_pipeline_reuses_cached_media(tmp_path: Path) -> None:
     async def scenario() -> None:
-        pipeline = CollectorPipeline(tmp_path)
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
         await pipeline.initialize()
         await pipeline.fetcher.close()
         fake = FakeFetcher()
@@ -647,7 +647,7 @@ def test_cross_origin_image_retries_with_referer_after_placeholder(
             )
 
     async def scenario() -> None:
-        pipeline = CollectorPipeline(tmp_path)
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
         await pipeline.initialize()
         await pipeline.fetcher.close()
         fake = PlaceholderFetcher()
@@ -748,7 +748,7 @@ def test_image_ranking_prefers_relevant_main_content_over_icons_and_ads(
             )
 
     async def scenario() -> None:
-        pipeline = CollectorPipeline(tmp_path)
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
         await pipeline.fetcher.close()
         pipeline.fetcher = ImageProbeFetcher()  # type: ignore[assignment]
         source = SourceConfig(
@@ -805,11 +805,96 @@ def test_image_query_constraints_validate_downloaded_dimensions(tmp_path: Path) 
             local_path=image_path,
         )
         candidate = Candidate(ContentType.IMAGE)
-        assert await CollectorPipeline._image_asset_matches(asset, candidate, "图片 横屏")
-        assert not await CollectorPipeline._image_asset_matches(asset, candidate, "图片 竖屏")
-        assert not await CollectorPipeline._image_asset_matches(
-            asset, candidate, "图片 至少1920x1080"
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        assert await pipeline._image_asset_matches(asset, candidate, "图片 横屏")
+        assert not await pipeline._image_asset_matches(asset, candidate, "图片 竖屏")
+        assert not await pipeline._image_asset_matches(asset, candidate, "图片 至少1920x1080")
+        await pipeline.fetcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_image_ignore_size_uses_actual_file_size_and_supports_disable(tmp_path: Path) -> None:
+    def image_bytes(size: int) -> bytes:
+        output = io.BytesIO()
+        Image.new("RGB", (800, 600), "blue").save(output, "PNG")
+        return output.getvalue().ljust(size, b"\0")
+
+    async def scenario() -> None:
+        small_path = tmp_path / "small.png"
+        small_path.write_bytes(image_bytes(100 * 1024 - 1))
+        boundary_path = tmp_path / "boundary.png"
+        boundary_path.write_bytes(image_bytes(100 * 1024))
+
+        def asset(path: Path) -> CollectedAsset:
+            return CollectedAsset(
+                asset_key=path.stem,
+                source_key="source",
+                source_name="Source",
+                content_type=ContentType.IMAGE,
+                origin_url=f"https://example.com/{path.name}",
+                mime_type="image/png",
+                local_path=path,
+            )
+
+        default_pipeline = CollectorPipeline(tmp_path)
+        assert not await default_pipeline._image_asset_matches(
+            asset(small_path), Candidate(ContentType.IMAGE), ""
         )
+        assert await default_pipeline._image_asset_matches(
+            asset(boundary_path), Candidate(ContentType.IMAGE), ""
+        )
+        await default_pipeline.fetcher.close()
+
+        disabled_pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        assert await disabled_pipeline._image_asset_matches(
+            asset(small_path), Candidate(ContentType.IMAGE), ""
+        )
+        await disabled_pipeline.fetcher.close()
+
+    asyncio.run(scenario())
+
+
+def test_image_ignore_size_rejects_small_download_before_cache(tmp_path: Path) -> None:
+    output = io.BytesIO()
+    Image.new("RGB", (800, 600), "blue").save(output, "PNG")
+    image = output.getvalue()
+
+    class SmallImageFetcher:
+        async def download(self, url, destination, *, headers=None):
+            destination.write_bytes(image)
+            return DownloadedFile(
+                url,
+                200,
+                "image/png",
+                {},
+                destination,
+                hashlib.sha256(image).hexdigest(),
+                500_000,
+            )
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        pipeline.fetcher = SmallImageFetcher()  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:size-limit",
+            template="website",
+            name="Size limit",
+            enabled=True,
+            url="https://example.com/gallery",
+            content_types=(ContentType.IMAGE,),
+            command="/image",
+        )
+        candidate = Candidate(ContentType.IMAGE, url="https://example.com/small.png")
+        with pytest.raises(Exception, match="小于 100 KB"):
+            await pipeline._materialize(
+                source, candidate, FetchResponse(source.url, 200, "text/html", b"")
+            )
+        assert await pipeline.cache.list_assets(source.key) == []
+        assert list(pipeline.cache.files_dir.glob(".download-*")) == []
+        await pipeline.cache.close()
 
     asyncio.run(scenario())
 
@@ -877,7 +962,7 @@ def test_pipeline_uses_image_description_to_select_relevant_content(tmp_path: Pa
             )
 
     async def scenario() -> None:
-        pipeline = CollectorPipeline(tmp_path)
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
         await pipeline.initialize()
         await pipeline.fetcher.close()
         fake = AccurateImageFetcher()
