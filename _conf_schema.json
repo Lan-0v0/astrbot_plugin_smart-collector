@@ -1,0 +1,230 @@
+{
+  "natural_language_enabled": {
+    "description": "启用自然语言爬取",
+    "type": "bool",
+    "default": true,
+    "hint": "启用后向 AstrBot 注册 smart_collect LLM 函数工具。"
+  },
+  "concurrency": {
+    "description": "并发爬取数",
+    "type": "int",
+    "default": 4,
+    "slider": {"min": 1, "max": 16, "step": 1}
+  },
+  "request_timeout": {
+    "description": "请求超时（秒）",
+    "type": "int",
+    "default": 30,
+    "slider": {"min": 5, "max": 120, "step": 5}
+  },
+  "custom_sources": {
+    "description": "自定义爬取项",
+    "type": "template_list",
+    "default": [
+      {
+        "__template_key": "api",
+        "name": "Lanの默认配置",
+        "enabled": true,
+        "url": "https://api.yaohud.cn/api/v2/setu",
+        "content_types": ["image"],
+        "command": "/插画",
+        "header_key": "key",
+        "header_value": "RgDEYLevGRcMSNIF8z9",
+        "dedupe": 0,
+        "image_to_pdf": false,
+        "compress": false,
+        "compression_password": "",
+        "forward_mode": "user",
+        "custom_qq": "",
+        "rate_limit": 1.0,
+        "schedules": [],
+        "schedule_time": "23:00",
+        "summary_provider": "",
+        "summary_prompt": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。",
+        "cache_days": 7
+      }
+    ],
+    "templates": {
+      "website": {
+        "name": "网站",
+        "hint": "从网页结构中自适应提取媒体或文字。",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": ""},
+          "enabled": {"description": "启用", "type": "bool", "default": true},
+          "url": {"description": "URL", "type": "string", "default": ""},
+          "content_types": {
+            "description": "类型",
+            "type": "list",
+            "options": ["video", "audio", "image", "text"],
+            "labels": ["视频", "音频", "图片", "文字"],
+            "default": ["video"]
+          },
+          "command": {"description": "专属指令", "type": "string", "default": ""},
+          "cookies": {
+            "description": "Cookie",
+            "type": "list",
+            "default": [],
+            "hint": "可添加多项 Cookie；每次请求轮换使用一项。"
+          },
+          "dedupe": {
+            "description": "去重",
+            "type": "int",
+            "default": 0,
+            "slider": {"min": -1, "max": 100, "step": 1},
+            "hint": "-1 不启用；0 永不重复；正数表示最近多少次内不重复。"
+          },
+          "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
+          "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
+          "compression_password": {
+            "description": "压缩密码",
+            "type": "string",
+            "default": "",
+            "condition": {"compress": true},
+            "hint": "留空则创建无密码 ZIP。"
+          },
+          "forward_mode": {
+            "description": "消息伪造转发",
+            "type": "string",
+            "options": ["none", "user", "custom"],
+            "labels": ["不启用", "用户", "自定义 QQ 号"],
+            "default": "user"
+          },
+          "custom_qq": {
+            "description": "自定义 QQ 号",
+            "type": "string",
+            "default": "",
+            "condition": {"forward_mode": "custom"}
+          },
+          "rate_limit": {
+            "description": "限速（秒）",
+            "type": "float",
+            "default": 1.0,
+            "slider": {"min": -1, "max": 1, "step": 0.1},
+            "hint": "同一用户的请求间隔；-1 不启用。"
+          },
+          "schedules": {
+            "description": "定时发送",
+            "type": "list",
+            "options": ["每天", "每周", "每月", "周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            "default": []
+          },
+          "schedule_time": {
+            "description": "定时当天具体时间",
+            "type": "string",
+            "default": "23:00",
+            "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
+          },
+          "summary_provider": {
+            "description": "爬取文字摘要",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "hint": "不选则不启用。"
+          },
+          "summary_prompt": {
+            "description": "摘要模型人设",
+            "type": "text",
+            "default": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。"
+          },
+          "cache_days": {
+            "description": "爬取缓存清理（天）",
+            "type": "int",
+            "default": 7,
+            "slider": {"min": -1, "max": 7, "step": 1},
+            "hint": "-1 不清理；0 发送成功后清理；默认 7 天。"
+          }
+        }
+      },
+      "api": {
+        "name": "API",
+        "hint": "请求 JSON 或直返媒体 API，并递归定位资源 URL。",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": ""},
+          "enabled": {"description": "启用", "type": "bool", "default": true},
+          "url": {"description": "URL", "type": "string", "default": ""},
+          "content_types": {
+            "description": "类型",
+            "type": "list",
+            "options": ["video", "audio", "image", "text"],
+            "labels": ["视频", "音频", "图片", "文字"],
+            "default": ["video"]
+          },
+          "command": {"description": "专属指令", "type": "string", "default": ""},
+          "header_key": {"description": "请求头 - 键", "type": "string", "default": ""},
+          "header_value": {"description": "请求头 - 值", "type": "string", "default": ""},
+          "dedupe": {
+            "description": "去重",
+            "type": "int",
+            "default": 0,
+            "slider": {"min": -1, "max": 100, "step": 1},
+            "hint": "-1 不启用；0 永不重复；正数表示最近多少次内不重复。"
+          },
+          "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
+          "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
+          "compression_password": {
+            "description": "压缩密码",
+            "type": "string",
+            "default": "",
+            "condition": {"compress": true},
+            "hint": "留空则创建无密码 ZIP。"
+          },
+          "forward_mode": {
+            "description": "消息伪造转发",
+            "type": "string",
+            "options": ["none", "user", "custom"],
+            "labels": ["不启用", "用户", "自定义 QQ 号"],
+            "default": "user"
+          },
+          "custom_qq": {
+            "description": "自定义 QQ 号",
+            "type": "string",
+            "default": "",
+            "condition": {"forward_mode": "custom"}
+          },
+          "rate_limit": {
+            "description": "限速（秒）",
+            "type": "float",
+            "default": 1.0,
+            "slider": {"min": -1, "max": 1, "step": 0.1},
+            "hint": "同一用户的请求间隔；-1 不启用。"
+          },
+          "schedules": {
+            "description": "定时发送",
+            "type": "list",
+            "options": ["每天", "每周", "每月", "周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            "default": []
+          },
+          "schedule_time": {
+            "description": "定时当天具体时间",
+            "type": "string",
+            "default": "23:00",
+            "hint": "格式 00:00~23:59；只有定时发送有选项时才会执行。"
+          },
+          "summary_provider": {
+            "description": "爬取文字摘要",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider",
+            "hint": "不选则不启用。"
+          },
+          "summary_prompt": {
+            "description": "摘要模型人设",
+            "type": "text",
+            "default": "请把下面爬取到的文字提炼为准确、精简、易读的中文摘要。保留关键事实、数字、专有名词和必要链接，不推测原文未提供的信息；直接输出摘要，不要写前言。"
+          },
+          "cache_days": {
+            "description": "爬取缓存清理（天）",
+            "type": "int",
+            "default": 7,
+            "slider": {"min": -1, "max": 7, "step": 1},
+            "hint": "-1 不清理；0 发送成功后清理；默认 7 天。"
+          }
+        }
+      }
+    }
+  }
+}

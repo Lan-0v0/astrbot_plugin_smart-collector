@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astrbot-plugin-smart-collector"
+version = "0.0.1"
+description = "Adaptive media and text collector plugin for AstrBot"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Lan-0v0"}]
+dependencies = [
+  "httpx[http2]>=0.27,<1",
+  "beautifulsoup4>=4.12,<5",
+  "lxml>=5,<7",
+  "Pillow>=10,<13",
+  "pyzipper>=0.3.6,<1",
+  "curl-cffi>=0.7,<1",
+  "yt-dlp>=2025.1.15",
+]
+
+[tool.setuptools.packages.find]
+include = ["smart_collector*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.format]
+quote-style = "double"

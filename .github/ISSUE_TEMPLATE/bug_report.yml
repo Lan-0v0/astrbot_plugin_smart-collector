@@ -1,0 +1,29 @@
+name: Bug report
+description: 报告可复现的采集或发送问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: AstrBot 与插件版本
+    validations:
+      required: true
+  - type: dropdown
+    id: source_type
+    attributes:
+      label: 数据源类型
+      options: [网站, API]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 请移除 Cookie、请求头值和其他凭据。

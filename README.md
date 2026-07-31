@@ -1,1 +1,99 @@
 # astrbot_plugin_smart-collector
+
+AstrBot 智能采集插件。一个配置面板内管理多个网站/API 数据源，并以专属指令、通用
+`/采集` 指令或 `smart_collect` LLM 工具触发采集。
+
+## 功能
+
+- 四类内容：视频、音频、图片、文字；未明确指定时按视频 → 音频 → 图片 → 文字选择。
+- 网站与 API 两种可重复配置模板，每个条目有独立名称、开关、URL、类型和专属指令。
+- `asyncio` 并发采集；HTTP/2、重试、Cookie 轮换和 `curl-cffi` 浏览器 TLS 指纹回退。
+- 缓存媒体文件和文字，命中时复用本地数据；去重支持关闭、永久去重和最近 N 次去重。
+- 首次成功后记录 HTML 选择器或 JSON 路径；结构失效时自动回退到启发式解析并更新画像。
+- 可选图片转 PDF、图片/视频 ZIP 压缩、AES 压缩密码、OneBot 合并转发节点。
+- 用户级限速、按天/周/月/星期定时发送、缓存自动清理。
+- 可选择 AstrBot 已配置模型为文字生成摘要。
+- 视频页没有直链时使用 `yt-dlp` 通用解析器作为回退。
+
+反爬兼容层用于处理正常的 TLS/浏览器指纹检查和无需交互的 Cloudflare 页面，不绕过
+CAPTCHA、登录、付费墙、访问控制或站点授权。使用者仍需遵守目标网站条款、robots 规则和
+适用法律。
+
+## 安装
+
+在 AstrBot WebUI 中使用仓库地址安装：
+
+```text
+https://github.com/Lan-0v0/astrbot_plugin_smart-collector
+```
+
+AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10.4,<5`，因为配置面板
+使用了 `template_list`。
+
+## 使用
+
+默认配置自带以下 API 条目：
+
+| 字段 | 值 |
+| --- | --- |
+| 名称 | `Lanの默认配置` |
+| URL | `https://api.yaohud.cn/api/v2/setu` |
+| 请求头键 | `key` |
+| 请求头值 | `RgDEYLevGRcMSNIF8z9` |
+| 类型 | 图片 |
+| 专属指令 | `/插画` |
+
+该 API 实际要求旧式 `key` 查询参数。插件先按配置发送请求头；若 JSON 明确返回 401/403，
+会在同一域名自动用同一键值重试查询参数，以兼容该接口。
+
+常用触发方式：
+
+```text
+/插画
+/采集 视频
+/采集 给我一段音频
+```
+
+启用“自然语言爬取”后，AstrBot 的 LLM 可调用 `smart_collect`，参数包括需求文字、可选数据源
+名称和可选内容类型。
+
+定时发送需要先在对应条目勾选周期，并在目标会话中至少成功触发该条目一次。插件会记录
+该会话作为发送目标。“每周”沿用首次订阅的星期，“每月”沿用首次订阅的日期。
+
+## 配置说明
+
+配置由 `_conf_schema.json` 驱动。网站模板在“去重”之前提供多项 Cookie；API 模板提供请求头
+键和值。名称由 `display_item` 显示在条目折叠标题下方。
+
+AstrBot v4 当前的 schema 条件只支持“字段严格等于固定值”，不能表达“多选列表非空”或
+“模型提供商非空”。因此定时时间和摘要人设仍会显示；运行时只有周期非空、提供商非空时才
+启用相应功能。压缩密码和自定义 QQ 号使用可表达的等值条件，会按开关正常显隐。
+
+持久化数据位于 AstrBot 的：
+
+```text
+data/plugin_data/astrbot_plugin_smart_collector/
+```
+
+包含 SQLite 索引、解析画像、订阅记录和缓存文件；插件更新不会覆盖这些数据。
+
+## 开发与测试
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+ruff check .
+ruff format --check .
+python scripts/live_smoke.py
+```
+
+联网烟测覆盖妖狐 API、Mukyu 随机图片和视频排行网站。目标站离线、DNS 污染或出口策略阻断
+会被明确报告为外部网络失败，不会被伪装为成功。
+
+## 版本
+
+当前版本：`v0.0.1`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+[MIT](LICENSE)
