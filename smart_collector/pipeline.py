@@ -98,26 +98,35 @@ class CollectorPipeline:
         if not allowed_types:
             raise CollectionError(f"{source.name} 未配置所请求的内容类型")
 
+        asset: CollectedAsset | None = None
         try:
-            response = await self.fetcher.fetch_source(source)
-            if response.status >= 400:
-                raise FetchError(f"HTTP {response.status}")
-            if source.template == "website":
-                page_url = self.extractor.random_page_url(response, self._rng)
-                if page_url and page_url != response.url:
-                    try:
-                        paged = await self.fetcher.fetch(
-                            page_url, headers=AntiBotFetcher.source_headers(source)
-                        )
-                        if paged.status < 400:
-                            response = paged
-                    except Exception:
-                        pass
-            profile = await self.cache.get_profile(source.key)
-            candidates, new_profile = self.extractor.extract(response, allowed_types, profile)
-            if new_profile and new_profile != profile:
-                await self.cache.save_profile(source.key, new_profile)
-            asset = await self._collect_by_priority(source, response, candidates, allowed_types)
+            direct_type = self.extractor._url_type(source.url)
+            if direct_type in allowed_types:
+                asset = await self._try_candidates(
+                    source,
+                    FetchResponse(source.url, 200, "", b""),
+                    [Candidate(direct_type, url=source.url)],
+                )
+            if asset is None:
+                response = await self.fetcher.fetch_source(source)
+                if response.status >= 400:
+                    raise FetchError(f"HTTP {response.status}")
+                if source.template == "website":
+                    page_url = self.extractor.random_page_url(response, self._rng)
+                    if page_url and page_url != response.url:
+                        try:
+                            paged = await self.fetcher.fetch(
+                                page_url, headers=AntiBotFetcher.source_headers(source)
+                            )
+                            if paged.status < 400:
+                                response = paged
+                        except Exception:
+                            pass
+                profile = await self.cache.get_profile(source.key)
+                candidates, new_profile = self.extractor.extract(response, allowed_types, profile)
+                if new_profile and new_profile != profile:
+                    await self.cache.save_profile(source.key, new_profile)
+                asset = await self._collect_by_priority(source, response, candidates, allowed_types)
         except Exception as exc:
             cached = await self._cached_fallback(source, allowed_types)
             if cached:
@@ -125,6 +134,7 @@ class CollectorPipeline:
             else:
                 raise CollectionError(f"{source.name} 抓取失败: {exc}") from exc
 
+        assert asset is not None
         if source.image_to_pdf and asset.content_type is ContentType.IMAGE:
             asset = await self.postprocessor.image_to_pdf(asset)
         if source.compress and asset.content_type in {ContentType.IMAGE, ContentType.VIDEO}:
@@ -176,7 +186,11 @@ class CollectorPipeline:
                 asset = await self._try_candidates(
                     source,
                     source_response,
-                    await self._yt_dlp_candidates(source_response.url, source.video_quality),
+                    await self._yt_dlp_candidates(
+                        source_response.url,
+                        source.video_quality,
+                        AntiBotFetcher.source_headers(source),
+                    ),
                 )
                 if asset:
                     return asset
@@ -397,12 +411,15 @@ class CollectorPipeline:
             raise CollectionError("HLS 视频下载需要 yt-dlp") from exc
 
         partial_stem = self.cache.files_dir / f".hls-{uuid.uuid4().hex}"
-        headers = self._candidate_headers(source, candidate, include_cross_origin_referer=True)
 
         def download() -> Path:
             preferred_format = "best" if source.video_quality == "highest" else "worst"
 
-            def run(format_selector: str | None) -> Path:
+            def cleanup() -> None:
+                for partial in self.cache.files_dir.glob(partial_stem.name + ".*"):
+                    partial.unlink(missing_ok=True)
+
+            def run(format_selector: str | None, headers: dict[str, str]) -> Path:
                 options = {
                     "quiet": True,
                     "no_warnings": True,
@@ -426,14 +443,29 @@ class CollectorPipeline:
                     raise CollectionError("yt-dlp 未生成视频文件")
                 return matches[0]
 
-            try:
-                return run(preferred_format)
-            except Exception:
-                for partial in self.cache.files_dir.glob(partial_stem.name + ".*"):
-                    partial.unlink(missing_ok=True)
-                return run(None)
+            header_options = [self._candidate_headers(source, candidate)]
+            cross_origin_headers = self._candidate_headers(
+                source, candidate, include_cross_origin_referer=True
+            )
+            if cross_origin_headers != header_options[0]:
+                header_options.append(cross_origin_headers)
+            last_error: Exception | None = None
+            for headers in header_options:
+                for format_selector in (preferred_format, None):
+                    cleanup()
+                    try:
+                        return run(format_selector, headers)
+                    except Exception as exc:
+                        last_error = exc
+            cleanup()
+            raise CollectionError(f"HLS 视频下载失败: {last_error}") from last_error
 
-        downloaded = await asyncio.to_thread(download)
+        try:
+            downloaded = await asyncio.to_thread(download)
+        except Exception:
+            for partial in self.cache.files_dir.glob(partial_stem.name + ".*"):
+                partial.unlink(missing_ok=True)
+            raise
         try:
             content_digest = await asyncio.to_thread(self._file_digest, downloaded)
             asset_key = hashlib.sha256(f"{source.key}:{content_digest}".encode()).hexdigest()
@@ -512,7 +544,9 @@ class CollectorPipeline:
         }[content_type]
 
     @staticmethod
-    async def _yt_dlp_candidates(url: str, video_quality: str) -> list[Candidate]:
+    async def _yt_dlp_candidates(
+        url: str, video_quality: str, headers: dict[str, str] | None = None
+    ) -> list[Candidate]:
         try:
             import yt_dlp
         except ImportError:
@@ -524,6 +558,7 @@ class CollectorPipeline:
                 "no_warnings": True,
                 "skip_download": True,
                 "noplaylist": False,
+                "http_headers": dict(headers or {}),
             }
             if format_selector:
                 options["format"] = format_selector
@@ -543,6 +578,7 @@ class CollectorPipeline:
                             title=entry.get("title") or "",
                             mime_type="video/mp4",
                             selector="yt-dlp",
+                            referer=url,
                             width=int(entry.get("width") or 0),
                             height=int(entry.get("height") or 0),
                         )

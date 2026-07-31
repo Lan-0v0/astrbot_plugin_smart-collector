@@ -326,7 +326,7 @@ class CacheStore:
                 continue
             cutoff = now if days == 0 else now - days * 86400
             rows = self._conn.execute(
-                "SELECT asset_key, local_path FROM assets WHERE source_key = ? AND created_at < ?",
+                "SELECT asset_key, local_path FROM assets WHERE source_key = ? AND created_at <= ?",
                 (source_key, cutoff),
             ).fetchall()
             for row in rows:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 
 from PIL import Image
@@ -17,7 +18,13 @@ class PostProcessor:
         if asset.content_type is not ContentType.IMAGE or not asset.local_path:
             return asset
         target = self.output_dir / f"{asset.asset_key}.pdf"
-        await asyncio.to_thread(self._image_to_pdf_sync, asset.local_path, target)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(self._image_to_pdf_sync, asset.local_path, temporary)
+            temporary.replace(target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return CollectedAsset(
             asset_key=asset.asset_key + ":pdf",
             source_key=asset.source_key,
@@ -48,7 +55,13 @@ class PostProcessor:
         if not asset.local_path:
             return asset
         target = self.output_dir / f"{asset.asset_key.replace(':', '_')}.zip"
-        await asyncio.to_thread(self._compress_sync, asset.local_path, target, password)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await asyncio.to_thread(self._compress_sync, asset.local_path, temporary, password)
+            temporary.replace(target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return CollectedAsset(
             asset_key=asset.asset_key + ":zip",
             source_key=asset.source_key,

@@ -48,6 +48,38 @@ def test_html_profile_falls_back_after_layout_change() -> None:
     assert new_profile != profile
 
 
+def test_html_profile_ignores_malformed_saved_rules() -> None:
+    extractor = AdaptiveExtractor()
+    html = b"<html><body><img src='/valid.png'></body></html>"
+    candidates, _ = extractor.extract(
+        response(html, "text/html", "https://example.com/page"),
+        (ContentType.IMAGE,),
+        {
+            "mode": "html",
+            "selectors": [None, {"selector": None}, {"selector": "[broken"}],
+            "json_ld_paths": [None, {"content_type": "unknown", "path": []}],
+        },
+    )
+    assert candidates[0].url == "https://example.com/valid.png"
+
+
+def test_non_mapping_and_malformed_json_profiles_are_ignored() -> None:
+    extractor = AdaptiveExtractor()
+    payload = {"data": {"url": "https://cdn.test/new.jpg"}}
+    candidates, _ = extractor.extract(
+        response(json.dumps(payload).encode(), "application/json"),
+        (ContentType.IMAGE,),
+        ["invalid profile"],  # type: ignore[arg-type]
+    )
+    assert candidates[0].url == "https://cdn.test/new.jpg"
+    candidates, _ = extractor.extract(
+        response(json.dumps(payload).encode(), "application/json"),
+        (ContentType.IMAGE,),
+        {"mode": "json", "json_paths": [None, {"path": ["missing"]}]},
+    )
+    assert candidates[0].url == "https://cdn.test/new.jpg"
+
+
 def test_direct_image_response() -> None:
     candidates, profile = AdaptiveExtractor().extract(
         response(b"png", "image/png", "https://example.com/random"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -29,22 +30,76 @@ from .smart_collector.schedule import schedule_slot
 COLLECT_COMMAND_USAGE = (
     "爬虫指令规范为：/爬取 [URL] [类型]\n其中URL为必须项，类型（视频/图片/音频/文字）为不必须项"
 )
+CUSTOM_SOURCE_COMMANDS: set[str] = set()
+RESERVED_COMMANDS = {"/爬取", "爬取", "/抓取", "抓取"}
+
+
+def _config_number(value, default: int | float, converter):
+    try:
+        converted = converter(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if isinstance(converted, float) and not math.isfinite(converted):
+        return default
+    return converted
+
+
+def _command_variants(command: str) -> tuple[str, ...]:
+    value = command.strip()
+    if not value:
+        return ()
+    without_slash = value[1:] if value.startswith("/") else value
+    return tuple(dict.fromkeys(item for item in (value, without_slash) if item))
+
+
+def _match_custom_source(
+    message: str, sources: list[SourceConfig]
+) -> tuple[SourceConfig | None, str]:
+    text = message.strip()
+    for source in sources:
+        if not source.enabled:
+            continue
+        for command in _command_variants(source.command):
+            if command in RESERVED_COMMANDS:
+                continue
+            if text == command:
+                return source, ""
+            if text.startswith(command + " "):
+                return source, text[len(command) :].strip()
+    return None, ""
+
+
+class CustomSourceCommandFilter(filter.CustomFilter):
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        message = event.get_message_str().strip()
+        return any(
+            message == command or message.startswith(command + " ")
+            for command in CUSTOM_SOURCE_COMMANDS
+        )
 
 
 @register(
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.1.1",
+    "v0.1.2",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
         self.config = config
         self.sources = load_sources(config)
+        CUSTOM_SOURCE_COMMANDS.clear()
+        for source in self.sources:
+            if source.enabled:
+                CUSTOM_SOURCE_COMMANDS.update(
+                    command
+                    for command in _command_variants(source.command)
+                    if command not in RESERVED_COMMANDS
+                )
         self.summary_provider = str(config.get("summary_provider") or "")
         self.summary_prompt = str(config.get("summary_prompt") or DEFAULT_SUMMARY_PROMPT)
-        self.cache_days = int(config.get("cache_days", 7))
+        self.cache_days = int(_config_number(config.get("cache_days", 7), 7, int))
         self.pipeline: CollectorPipeline | None = None
         self._tasks: list[asyncio.Task] = []
 
@@ -52,8 +107,8 @@ class SmartCollectorPlugin(Star):
         data_dir = StarTools.get_data_dir("astrbot_plugin_smart_collector")
         self.pipeline = CollectorPipeline(
             data_dir,
-            concurrency=int(self.config.get("concurrency", -1)),
-            timeout=float(self.config.get("request_timeout", -1)),
+            concurrency=int(_config_number(self.config.get("concurrency", -1), -1, int)),
+            timeout=float(_config_number(self.config.get("request_timeout", -1), -1, float)),
         )
         await self.pipeline.initialize()
         if not bool(self.config.get("natural_language_enabled", True)):
@@ -67,7 +122,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.1.1 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.1.2 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -80,24 +135,13 @@ class SmartCollectorPlugin(Star):
         async for result in self._collect_and_reply(event, [self._temporary_source(url)], query):
             yield result
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    @filter.custom_filter(CustomSourceCommandFilter, priority=10)
     async def custom_source_commands(self, event: AstrMessageEvent) -> MessageEventResult:
         """识别配置中每个自定义爬取项的专属指令。"""
-        message = event.message_str.strip()
-        source = next(
-            (
-                item
-                for item in self.sources
-                if item.enabled
-                and item.command
-                and (message == item.command or message.startswith(item.command + " "))
-            ),
-            None,
-        )
+        source, query = _match_custom_source(event.get_message_str(), self.sources)
         if not source:
             return
         event.stop_event()
-        query = message[len(source.command) :].strip()
         async for result in self._collect_and_reply(event, [source], query):
             yield result
 
@@ -282,7 +326,9 @@ class SmartCollectorPlugin(Star):
                         str(target["sender_name"]),
                     )
                 )
-                await self.context.send_message(str(target["umo"]), chain)
+                delivered = await self.context.send_message(str(target["umo"]), chain)
+                if delivered is False:
+                    raise RuntimeError("AstrBot 未找到可发送的目标平台")
                 sent = True
                 if target.get("configured_group"):
                     await self.pipeline.cache.mark_schedule_slot(

@@ -369,7 +369,13 @@ class AntiBotFetcher:
             payload: Any = json.loads(response.body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return False
-        return isinstance(payload, dict) and int(payload.get("code", 0) or 0) in {401, 403}
+        if not isinstance(payload, dict):
+            return False
+        try:
+            code = int(payload.get("code", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return code in {401, 403}
 
     @staticmethod
     def _with_query(url: str, key: str, value: str) -> str:

@@ -21,6 +21,7 @@ class Decorators:
 
     command = _decorator
     event_message_type = _decorator
+    custom_filter = _decorator
     llm_tool = _decorator
 
 
@@ -44,6 +45,10 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         def fromFileSystem(cls, path):
             return cls(path)
 
+    class CustomFilter:
+        def __init__(self, *args, **kwargs):
+            pass
+
     for name in ("Plain", "File", "Image", "Video", "Record", "Node"):
         setattr(components, name, type(name, (Component,), {}))
     api.AstrBotConfig = dict
@@ -52,6 +57,7 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     event.MessageChain = type("MessageChain", (Component,), {})
     event.MessageEventResult = type("MessageEventResult", (), {})
     event.filter = Decorators
+    Decorators.CustomFilter = CustomFilter
     star.Context = type("Context", (), {})
     star.Star = Star
     star.StarTools = type("StarTools", (), {})
@@ -112,6 +118,35 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         assert results == [module.COLLECT_COMMAND_USAGE]
 
     asyncio.run(command_scenario())
+
+    movie_source = module.SourceConfig.from_mapping(
+        {
+            "name": "影片",
+            "url": "https://example.com/movie",
+            "command": "/看片",
+        }
+    )
+    assert module._match_custom_source("看片", [movie_source]) == (movie_source, "")
+    assert module._match_custom_source("/看片 视频", [movie_source]) == (
+        movie_source,
+        "视频",
+    )
+    assert module._match_custom_source("看片段", [movie_source]) == (None, "")
+    reserved_source = module.SourceConfig.from_mapping(
+        {"name": "冲突项", "url": "https://example.com", "command": "/爬取"}
+    )
+    assert module._match_custom_source("爬取 https://example.com", [reserved_source]) == (
+        None,
+        "",
+    )
+
+    module.CUSTOM_SOURCE_COMMANDS.clear()
+    module.CUSTOM_SOURCE_COMMANDS.update(module._command_variants(movie_source.command))
+    source_filter = module.CustomSourceCommandFilter()
+    stripped_event = types.SimpleNamespace(get_message_str=lambda: "看片")
+    unrelated_event = types.SimpleNamespace(get_message_str=lambda: "普通聊天")
+    assert source_filter.filter(stripped_event, {})
+    assert not source_filter.filter(unrelated_event, {})
 
     class Platform:
         @staticmethod
@@ -177,5 +212,15 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         assert len(sent_messages) == 2
         assert len(scheduled_pipeline.sent_assets) == 1
         assert len(scheduled_pipeline.cache.slots) == 2
+
+        async def failed_send_message(umo, chain):
+            return False
+
+        failed_pipeline = ScheduledPipeline()
+        plugin.pipeline = failed_pipeline
+        plugin.context.send_message = failed_send_message
+        await plugin._send_scheduled(scheduled, due)
+        assert failed_pipeline.cache.slots == []
+        assert failed_pipeline.sent_assets == []
 
     asyncio.run(schedule_scenario())

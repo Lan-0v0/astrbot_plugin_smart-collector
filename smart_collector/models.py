@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -46,7 +47,7 @@ def normalize_time(value: Any) -> str:
 def normalize_types(values: Any) -> tuple[ContentType, ...]:
     if not values:
         return (ContentType.VIDEO,)
-    if isinstance(values, str):
+    if isinstance(values, str) or not isinstance(values, (list, tuple, set)):
         values = [values]
     result: list[ContentType] = []
     for value in values:
@@ -63,6 +64,16 @@ def normalize_types(values: Any) -> tuple[ContentType, ...]:
 
 def normalize_video_quality(value: Any) -> str:
     return "highest" if str(value).strip().lower() == "highest" else "lowest"
+
+
+def _safe_number(value: Any, default: int | float, converter: type[int] | type[float]):
+    try:
+        converted = converter(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if isinstance(converted, float) and not math.isfinite(converted):
+        return default
+    return converted
 
 
 @dataclass(slots=True)
@@ -91,6 +102,8 @@ class SourceConfig:
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
         template = str(value.get("__template_key") or value.get("template") or "website")
+        if template not in {"website", "api"}:
+            template = "website"
         name = str(value.get("name") or f"未命名条目 {index + 1}").strip()
         command = str(value.get("command") or "").strip()
         if command and not command.startswith("/"):
@@ -105,11 +118,22 @@ class SourceConfig:
             headers[header_key] = str(value.get("header_value") or "")
 
         cookies = value.get("cookies") or []
-        if isinstance(cookies, str):
+        if isinstance(cookies, str) or not isinstance(cookies, (list, tuple, set)):
             cookies = [cookies]
         target_qq_groups = value.get("target_qq_groups") or []
         if isinstance(target_qq_groups, (str, int)):
             target_qq_groups = [target_qq_groups]
+        schedules = value.get("schedules") or []
+        if isinstance(schedules, str):
+            schedules = [schedules]
+        elif not isinstance(schedules, (list, tuple, set)):
+            schedules = []
+        dedupe = int(_safe_number(value.get("dedupe", 0), 0, int))
+        dedupe = -1 if dedupe < 0 else 0
+        rate_limit = float(_safe_number(value.get("rate_limit", 1.0), 1.0, float))
+        forward_mode = str(value.get("forward_mode") or "user")
+        if forward_mode not in {"none", "user", "custom"}:
+            forward_mode = "user"
 
         return cls(
             key=f"{template}:{name}:{hashlib.sha1(str(value.get('url') or '').encode()).hexdigest()[:10]}",
@@ -119,17 +143,17 @@ class SourceConfig:
             url=str(value.get("url") or "").strip(),
             content_types=normalize_types(value.get("content_types")),
             command=command,
-            dedupe=int(value.get("dedupe", 0)),
+            dedupe=dedupe,
             video_quality=normalize_video_quality(value.get("video_quality")),
             cookies=tuple(str(item).strip() for item in cookies if str(item).strip()),
             headers=headers,
             image_to_pdf=bool(value.get("image_to_pdf", False)),
             compress=bool(value.get("compress", False)),
             compression_password=str(value.get("compression_password") or ""),
-            forward_mode=str(value.get("forward_mode") or "user"),
+            forward_mode=forward_mode,
             custom_qq=str(value.get("custom_qq") or ""),
-            rate_limit=float(value.get("rate_limit", 1.0)),
-            schedules=tuple(str(item) for item in (value.get("schedules") or [])),
+            rate_limit=rate_limit,
+            schedules=tuple(str(item) for item in schedules),
             schedule_time=normalize_time(value.get("schedule_time")),
             target_qq_groups=tuple(
                 dict.fromkeys(

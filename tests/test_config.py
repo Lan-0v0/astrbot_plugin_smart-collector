@@ -61,7 +61,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.1.1"
+    assert metadata["version"] == "v0.1.2"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -102,3 +102,27 @@ def test_source_normalization() -> None:
     assert source.key.startswith("website:示例:")
     assert normalize_time("7:05") == "07:05"
     assert normalize_time("25:00") == "23:00"
+
+
+def test_source_normalization_tolerates_invalid_legacy_values() -> None:
+    source = SourceConfig.from_mapping(
+        {
+            "template": "unknown",
+            "url": "https://example.com",
+            "dedupe": "forever",
+            "rate_limit": None,
+            "forward_mode": "invalid",
+            "schedules": "每天",
+        }
+    )
+    assert source.template == "website"
+    assert source.dedupe == 0
+    assert source.rate_limit == 1.0
+    assert source.forward_mode == "user"
+    assert source.schedules == ("每天",)
+
+    source = SourceConfig.from_mapping(
+        {"url": "https://example.com", "dedupe": -99, "rate_limit": "-1"}
+    )
+    assert source.dedupe == -1
+    assert source.rate_limit == -1.0

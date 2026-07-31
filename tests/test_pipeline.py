@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from smart_collector.models import (
     Candidate,
     ContentType,
@@ -247,6 +249,57 @@ def test_pipeline_fetches_a_random_discovered_page(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_direct_media_url_uses_streaming_download_first(tmp_path: Path) -> None:
+    class DirectFetcher:
+        def __init__(self) -> None:
+            self.fetch_source_called = False
+
+        async def probe(self, url, *, headers=None):
+            return FetchResponse(url, 200, "video/mp4", b"")
+
+        async def fetch_source(self, source):
+            self.fetch_source_called = True
+            raise AssertionError("direct media must not use the buffered page fetch")
+
+        async def download(self, url, destination, *, headers=None):
+            body = b"large-streamed-video"
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "video/mp4",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = DirectFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:direct",
+            template="website",
+            name="Direct",
+            enabled=True,
+            url="https://cdn.example/movie.mp4",
+            content_types=(ContentType.VIDEO,),
+            command="/direct",
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        asset = await pipeline.collect(source, None, "user")
+        assert asset.exists
+        assert asset.origin_url == source.url
+        assert not fake.fetch_source_called
+        await pipeline.cache.close()
+
+    asyncio.run(scenario())
+
+
 def test_pipeline_falls_back_to_detail_after_bad_page_candidate(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = CollectorPipeline(tmp_path, rng=FixedRandom())  # type: ignore[arg-type]
@@ -480,12 +533,71 @@ def test_yt_dlp_quality_falls_back_to_automatic_format(monkeypatch) -> None:
 
     monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YoutubeDL))
     candidates = asyncio.run(
-        CollectorPipeline._yt_dlp_candidates("https://example.com/watch/1", "highest")
+        CollectorPipeline._yt_dlp_candidates(
+            "https://example.com/watch/1", "highest", {"Cookie": "session=1"}
+        )
     )
     assert requested_formats == ["best", None]
     assert len(candidates) == 1
     assert candidates[0].url == "https://cdn.example/auto.mp4"
+    assert candidates[0].referer == "https://example.com/watch/1"
     assert (candidates[0].width, candidates[0].height) == (1280, 720)
+
+
+def test_hls_retries_without_then_with_cross_origin_referer_and_cleans_up(
+    monkeypatch, tmp_path: Path
+) -> None:
+    attempts: list[tuple[str | None, dict[str, str]]] = []
+
+    class YoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, download=True):
+            attempts.append(
+                (self.options.get("format"), dict(self.options.get("http_headers") or {}))
+            )
+            Path(self.options["outtmpl"].replace("%(ext)s", "part")).write_bytes(b"partial")
+            raise RuntimeError("download failed")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YoutubeDL))
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        source = SourceConfig(
+            key="website:hls",
+            template="website",
+            name="HLS",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.VIDEO,),
+            command="/hls",
+            video_quality="lowest",
+        )
+        candidate = Candidate(
+            ContentType.VIDEO,
+            url="https://cdn.example/video.m3u8",
+            referer=source.url,
+        )
+        with pytest.raises(Exception, match="HLS 视频下载失败"):
+            await pipeline._materialize_hls(source, candidate)
+        assert attempts == [
+            ("worst", {}),
+            (None, {}),
+            ("worst", {"Referer": source.url}),
+            (None, {"Referer": source.url}),
+        ]
+        assert list(pipeline.cache.files_dir.glob(".hls-*")) == []
+        await pipeline.close()
+
+    asyncio.run(scenario())
 
 
 def test_pipeline_crawls_video_detail_pages(tmp_path: Path) -> None:

@@ -1,9 +1,11 @@
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
 
 from smart_collector.fetcher import AntiBotFetcher
+from smart_collector.models import FetchResponse
 
 
 def test_negative_limits_disable_timeout_and_concurrency_limit() -> None:
@@ -54,3 +56,13 @@ def test_media_download_streams_past_page_buffer_limit(tmp_path: Path) -> None:
             await fetcher.close()
 
     asyncio.run(scenario())
+
+
+def test_non_numeric_api_code_is_not_treated_as_rejected() -> None:
+    response = FetchResponse(
+        "https://api.example/data",
+        200,
+        "application/json",
+        json.dumps({"code": "Unauthorized"}).encode(),
+    )
+    assert not AntiBotFetcher._api_key_rejected(response)

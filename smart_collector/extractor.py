@@ -42,7 +42,8 @@ class AdaptiveExtractor:
         requested: tuple[ContentType, ...],
         profile: dict[str, Any] | None = None,
     ) -> tuple[list[Candidate], dict[str, Any]]:
-        profile = profile or {}
+        if not isinstance(profile, dict):
+            profile = {}
         direct_type = self._mime_type(response.content_type)
         if direct_type in requested and direct_type is not ContentType.TEXT:
             return [
@@ -174,6 +175,8 @@ class AdaptiveExtractor:
         candidates: list[Candidate] = []
         known_paths = profile.get("json_paths") if profile.get("mode") == "json" else []
         for path_item in known_paths or []:
+            if not isinstance(path_item, dict):
+                continue
             value = self._get_json_path(payload, path_item.get("path", []))
             if isinstance(value, str):
                 candidate = self._candidate_from_url(
@@ -231,16 +234,23 @@ class AdaptiveExtractor:
                 except (json.JSONDecodeError, TypeError):
                     continue
                 for item in profile.get("json_ld_paths", []):
+                    if not isinstance(item, dict):
+                        continue
                     value = self._get_json_path(payload, item.get("path", []))
                     if not isinstance(value, str):
                         continue
-                    forced_type = ContentType(item["content_type"])
+                    try:
+                        forced_type = ContentType(item.get("content_type", ""))
+                    except ValueError:
+                        continue
                     candidate = self._candidate_from_url(value, requested, title, forced_type)
                     if candidate:
                         candidate.selector = "script[type='application/ld+json']"
                         candidate.attribute = ".".join(map(str, item.get("path", [])))
                         candidates.append(candidate)
             for item in profile.get("selectors", []):
+                if not isinstance(item, dict) or not isinstance(item.get("selector"), str):
+                    continue
                 try:
                     elements = soup.select(item["selector"])
                 except Exception:
