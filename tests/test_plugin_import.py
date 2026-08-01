@@ -45,6 +45,10 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         def fromFileSystem(cls, path):
             return cls(path)
 
+        @classmethod
+        def fromBytes(cls, value):
+            return cls(value)
+
     class CustomFilter:
         def __init__(self, *args, **kwargs):
             pass
@@ -99,6 +103,19 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert len(chain) == 1
     assert type(chain[0]).__name__ == "Image"
 
+    pdf_asset = module.CollectedAsset(
+        asset_key="asset:pdf",
+        source_key=source.key,
+        source_name=source.name,
+        content_type=module.ContentType.IMAGE,
+        origin_url=asset.origin_url,
+        title="random.pdf",
+        mime_type="application/pdf",
+        local_path=ROOT / "random.pdf",
+    )
+    pdf_chain = plugin._build_chain(source, pdf_asset)
+    assert pdf_chain[0].kwargs["name"] == "炸金~❤️.pdf"
+
     source.forward_mode = "user"
     forwarded = plugin._build_chain(source, asset, "10001", "用户")
     assert len(forwarded) == 1
@@ -132,6 +149,13 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         "视频",
     )
     assert module._match_custom_source("看片段", [movie_source]) == (None, "")
+    pixiv_source = module.SourceConfig.from_mapping(
+        {"__template_key": "pixiv", "name": "P站", "command": "/p"}
+    )
+    assert module._match_custom_source("/p 百合 JK 白丝", [pixiv_source]) == (
+        pixiv_source,
+        "百合 JK 白丝",
+    )
     reserved_source = module.SourceConfig.from_mapping(
         {"name": "冲突项", "url": "https://example.com", "command": "/爬取"}
     )

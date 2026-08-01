@@ -25,6 +25,8 @@ def test_pdf_and_password_zip(tmp_path: Path) -> None:
         processor = PostProcessor(tmp_path / "output")
         pdf = await processor.image_to_pdf(asset)
         assert pdf.local_path and pdf.local_path.read_bytes().startswith(b"%PDF")
+        assert pdf.local_path.name == "炸金~❤️.pdf"
+        assert pdf.title == "炸金~❤️.pdf"
         archive = await processor.compress(asset, "secret")
         assert archive.local_path
         with pyzipper.AESZipFile(archive.local_path) as zipped:

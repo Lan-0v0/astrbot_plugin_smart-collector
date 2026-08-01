@@ -24,6 +24,7 @@ from .models import (
     FetchResponse,
     SourceConfig,
 )
+from .pixiv import PixivCollector, PixivError
 from .postprocess import PostProcessor
 
 
@@ -79,6 +80,7 @@ class CollectorPipeline:
         self.fetcher = AntiBotFetcher(timeout=timeout, concurrency=concurrency)
         self.extractor = AdaptiveExtractor()
         self.postprocessor = PostProcessor(data_dir / "output")
+        self.pixiv = PixivCollector(data_dir)
         self._rng = rng or random.SystemRandom()
         self._rate_lock = asyncio.Lock()
         self._last_requests: dict[tuple[str, str], float] = {}
@@ -130,6 +132,25 @@ class CollectorPipeline:
         allowed_types = tuple(item for item in allowed_types if item in source.content_types)
         if not allowed_types:
             raise CollectionError(f"{source.name} 未配置所请求的内容类型")
+
+        if source.template == "pixiv":
+            try:
+                candidates = await self.pixiv.candidates(source, query)
+                asset = await self._try_candidates(
+                    source,
+                    FetchResponse(source.url, 200, "application/json", b""),
+                    candidates,
+                    query,
+                )
+                if asset is None:
+                    raise PixivError("Pixiv 候选均已去重或无法下载")
+            except PixivError as exc:
+                raise CollectionError(str(exc)) from exc
+            if source.image_to_pdf and asset.content_type is ContentType.IMAGE:
+                asset = await self.postprocessor.image_to_pdf(asset)
+            if source.compress and asset.content_type in {ContentType.IMAGE, ContentType.VIDEO}:
+                asset = await self.postprocessor.compress(asset, source.compression_password)
+            return asset
 
         asset: CollectedAsset | None = None
         try:
@@ -649,7 +670,9 @@ class CollectorPipeline:
         same_origin = urlsplit(candidate.url).hostname == urlsplit(source.url).hostname
         if same_origin:
             headers.update(AntiBotFetcher.source_headers(source))
-        if candidate.referer and (same_origin or include_cross_origin_referer):
+        if candidate.referer and (
+            same_origin or include_cross_origin_referer or source.template == "pixiv"
+        ):
             headers["Referer"] = candidate.referer
         return headers
 

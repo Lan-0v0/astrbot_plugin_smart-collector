@@ -45,17 +45,38 @@ def test_schema_contains_required_default_api() -> None:
     assert default["forward_mode"] == "none"
     for key in ("summary_provider", "summary_prompt", "cache_days"):
         assert key not in default
-    for template in schema["custom_sources"]["templates"].values():
+    templates = schema["custom_sources"]["templates"]
+    assert set(templates) == {"website", "api", "pixiv"}
+    for template_key, template in templates.items():
         items = template["items"]
         assert items["dedupe"]["slider"] == {"min": -1, "max": 0, "step": 1}
-        assert items["video_quality"]["default"] == "lowest"
         assert items["forward_mode"]["default"] == "user"
         assert items["target_qq_groups"]["default"] == []
         keys = list(items)
-        assert keys.index("video_quality") == keys.index("dedupe") + 1
         assert keys.index("target_qq_groups") == keys.index("schedule_time") + 1
+        if template_key != "pixiv":
+            assert items["video_quality"]["default"] == "lowest"
+            assert keys.index("video_quality") == keys.index("dedupe") + 1
         for key in ("summary_provider", "summary_prompt", "cache_days"):
             assert key not in items
+    pixiv_items = templates["pixiv"]["items"]
+    assert list(pixiv_items) == [
+        "name",
+        "enabled",
+        "command",
+        "age_mode",
+        "dedupe",
+        "image_to_pdf",
+        "compress",
+        "compression_password",
+        "forward_mode",
+        "custom_qq",
+        "rate_limit",
+        "schedules",
+        "schedule_time",
+        "target_qq_groups",
+    ]
+    assert pixiv_items["age_mode"]["default"] == "all"
     source = load_sources({"custom_sources": [default]})[0]
     assert source.headers == {"key": "RgDEYLevGRcMSNIF8z9"}
     assert source.content_types == (ContentType.IMAGE,)
@@ -65,7 +86,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.1.7"
+    assert metadata["version"] == "v0.2.0"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -130,3 +151,25 @@ def test_source_normalization_tolerates_invalid_legacy_values() -> None:
     )
     assert source.dedupe == -1
     assert source.rate_limit == -1.0
+
+
+def test_pixiv_source_normalization_without_url() -> None:
+    sources = load_sources(
+        {
+            "custom_sources": [
+                {
+                    "__template_key": "pixiv",
+                    "name": "P站",
+                    "command": "p",
+                    "age_mode": "r18",
+                }
+            ]
+        }
+    )
+    assert len(sources) == 1
+    source = sources[0]
+    assert source.template == "pixiv"
+    assert source.url == "https://app-api.pixiv.net/"
+    assert source.command == "/p"
+    assert source.content_types == (ContentType.IMAGE,)
+    assert source.pixiv_age_mode == "r18"

@@ -17,7 +17,9 @@ class PostProcessor:
     async def image_to_pdf(self, asset: CollectedAsset) -> CollectedAsset:
         if asset.content_type is not ContentType.IMAGE or not asset.local_path:
             return asset
-        target = self.output_dir / f"{asset.asset_key}.pdf"
+        target_dir = self.output_dir / asset.asset_key.replace(":", "_")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / "炸金~❤️.pdf"
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             await asyncio.to_thread(self._image_to_pdf_sync, asset.local_path, temporary)
@@ -31,7 +33,7 @@ class PostProcessor:
             source_name=asset.source_name,
             content_type=ContentType.IMAGE,
             origin_url=asset.origin_url,
-            title=(asset.title or asset.local_path.stem) + ".pdf",
+            title="炸金~❤️.pdf",
             mime_type="application/pdf",
             local_path=target,
             cached=asset.cached,

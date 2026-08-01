@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astrbot-plugin-smart-collector"
-version = "0.1.7"
+version = "0.2.0"
 description = "Adaptive media and text collector plugin for AstrBot"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,8 @@ dependencies = [
   "curl-cffi>=0.7,<1",
   "yt-dlp>=2025.1.15",
   "jsbeautifier>=2,<3",
+  "pixivpy3>=3.7.5,<3.8",
+  "qrcode[pil]>=7.4,<9",
 ]
 
 [tool.setuptools.packages.find]

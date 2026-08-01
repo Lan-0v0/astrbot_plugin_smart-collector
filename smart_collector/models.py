@@ -98,11 +98,13 @@ class SourceConfig:
     schedules: tuple[str, ...] = ()
     schedule_time: str = "23:00"
     target_qq_groups: tuple[str, ...] = ()
+    pixiv_refresh_token: str = ""
+    pixiv_age_mode: str = "all"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
         template = str(value.get("__template_key") or value.get("template") or "website")
-        if template not in {"website", "api"}:
+        if template not in {"website", "api", "pixiv"}:
             template = "website"
         name = str(value.get("name") or f"未命名条目 {index + 1}").strip()
         command = str(value.get("command") or "").strip()
@@ -135,13 +137,24 @@ class SourceConfig:
         if forward_mode not in {"none", "user", "custom"}:
             forward_mode = "user"
 
+        pixiv_refresh_token = str(value.get("refresh_token") or "").strip()
+        pixiv_age_mode = str(value.get("age_mode") or "all").strip().lower()
+        if pixiv_age_mode not in {"all", "safe", "r18"}:
+            pixiv_age_mode = "all"
+        url = str(value.get("url") or "").strip()
+        if template == "pixiv":
+            url = url or "https://app-api.pixiv.net/"
+            content_types = (ContentType.IMAGE,)
+        else:
+            content_types = normalize_types(value.get("content_types"))
+
         return cls(
-            key=f"{template}:{name}:{hashlib.sha1(str(value.get('url') or '').encode()).hexdigest()[:10]}",
+            key=f"{template}:{name}:{hashlib.sha1(url.encode()).hexdigest()[:10]}",
             template=template,
             name=name,
             enabled=bool(value.get("enabled", True)),
-            url=str(value.get("url") or "").strip(),
-            content_types=normalize_types(value.get("content_types")),
+            url=url,
+            content_types=content_types,
             command=command,
             dedupe=dedupe,
             video_quality=normalize_video_quality(value.get("video_quality")),
@@ -160,6 +173,8 @@ class SourceConfig:
                     str(item).strip() for item in target_qq_groups if str(item).strip().isdigit()
                 )
             ),
+            pixiv_refresh_token=pixiv_refresh_token,
+            pixiv_age_mode=pixiv_age_mode,
         )
 
 

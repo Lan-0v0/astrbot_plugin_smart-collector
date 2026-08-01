@@ -419,7 +419,18 @@ class CacheStore:
             for row in rows:
                 for derived in (self.data_dir / "output").glob(f"{row['asset_key']}*"):
                     with suppress(OSError):
-                        derived.unlink(missing_ok=True)
+                        if derived.is_dir():
+                            import shutil
+
+                            shutil.rmtree(derived, ignore_errors=True)
+                        else:
+                            derived.unlink(missing_ok=True)
+                derived_dir = self.data_dir / "output" / str(row["asset_key"]).replace(":", "_")
+                if derived_dir.exists():
+                    with suppress(OSError):
+                        import shutil
+
+                        shutil.rmtree(derived_dir, ignore_errors=True)
                 self._conn.execute("DELETE FROM assets WHERE asset_key = ?", (row["asset_key"],))
                 if row["local_path"]:
                     still_referenced = self._conn.execute(
@@ -428,7 +439,10 @@ class CacheStore:
                     ).fetchone()
                     if not still_referenced:
                         with suppress(OSError):
-                            Path(row["local_path"]).unlink(missing_ok=True)
+                            local_path = Path(row["local_path"])
+                            local_path.unlink(missing_ok=True)
+                            if local_path.parent != self.data_dir:
+                                local_path.parent.rmdir()
                 removed += 1
         self._conn.commit()
         return removed

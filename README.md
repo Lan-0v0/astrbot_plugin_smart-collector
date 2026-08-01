@@ -6,7 +6,8 @@ AstrBot 智能采集插件。一个配置面板内管理多个网站/API 数据�
 ## 功能
 
 - 四类内容：视频、图片、音频、文字；未明确指定时按视频 → 图片 → 音频 → 文字选择。
-- 网站与 API 两种可重复配置模板，每个条目有独立名称、开关、URL、类型和专属指令。
+- 网站、API 与 Pixiv 三种可重复配置模板，每个条目有独立名称、开关和专属指令。
+- Pixiv 条目支持多 Tag 图片搜索、全年龄/R18/全部年龄段筛选，以及二维码 OAuth 登录。
 - `asyncio` 并发采集；HTTP/2、重试、Cookie 轮换和 `curl-cffi` 浏览器 TLS 指纹回退。
 - 缓存媒体文件和文字，命中时复用本地数据；去重支持关闭或永久去重。
 - 首次成功后记录 HTML 选择器或 JSON 路径；结构失效时自动回退到启发式解析并更新画像。
@@ -54,6 +55,9 @@ AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10
 
 ```text
 /插画
+/pixiv
+/pixiv 百合 JK 白丝
+/pixiv登陆
 /爬取 https://example.com/path
 /爬取 https://example.com/path 图片
 /爬取 https://example.com/path 图片 蓝色夜景 横屏
@@ -64,6 +68,10 @@ AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10
 URL 时只返回指令规范提示，不会抓取已配置条目。图片描述会参与候选排序和尺寸约束；如果页面没有
 足够的文字元数据，插件会继续使用正文位置、原图来源和图片质量进行回退。成功响应只发送抓取到的媒体或文字，不附加
 数据源名称、缓存状态和来源地址。
+
+Pixiv 条目首次使用时发送 `/pixiv登陆`，扫描二维码并在浏览器完成登录后，把回调地址作为
+`/pixiv登陆 [URL]` 发送。登录凭据只保存为插件数据目录中的 Refresh Token；随后可用
+`/pixiv [Tag1] [Tag2]` 或条目专属指令（例如 `/p 百合 JK 白丝`）搜索同时符合多个 Tag 的图片。
 
 启用“自然语言爬取”后，AstrBot 的 LLM 可调用 `smart_collect`，参数包括需求文字、可选数据源
 名称、可选内容类型和可选临时 URL。
@@ -111,7 +119,7 @@ python scripts/live_smoke.py --pektino-only --video-quality highest
 
 ## 版本
 
-当前版本：`v0.1.7`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.2.0`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

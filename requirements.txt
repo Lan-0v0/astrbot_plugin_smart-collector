@@ -6,3 +6,5 @@ pyzipper>=0.3.6,<1
 curl-cffi>=0.7,<1
 yt-dlp>=2025.1.15
 jsbeautifier>=2,<3
+pixivpy3>=3.7.5,<3.8
+qrcode[pil]>=7.4,<9

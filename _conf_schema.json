@@ -199,6 +199,70 @@
             "hint": "可添加多个纯数字QQ群号；通过当前启用的 OneBot 适配器定时发送。"
           }
         }
+      },
+      "pixiv": {
+        "name": "Pixiv",
+        "hint": "使用 Pixiv App API 按 Tag 搜索插画。首次使用请通过 /pixiv登陆 获取 Refresh Token。",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {"description": "名称", "type": "string", "default": ""},
+          "enabled": {"description": "启用", "type": "bool", "default": true},
+          "command": {"description": "专属指令", "type": "string", "default": ""},
+          "age_mode": {
+            "description": "年龄段",
+            "type": "string",
+            "options": ["safe", "r18", "all"],
+            "labels": ["仅全年龄", "仅R18", "全部"],
+            "default": "all"
+          },
+          "dedupe": {
+            "description": "去重",
+            "type": "int",
+            "default": 0,
+            "slider": {"min": -1, "max": 0, "step": 1},
+            "hint": "-1 不启用，0 永不重复。"
+          },
+          "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
+          "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
+          "compression_password": {
+            "description": "压缩密码",
+            "type": "string",
+            "default": "",
+            "condition": {"compress": true}
+          },
+          "forward_mode": {
+            "description": "消息伪造转发",
+            "type": "string",
+            "options": ["none", "user", "custom"],
+            "labels": ["不启用", "用户", "自定义QQ号"],
+            "default": "user"
+          },
+          "custom_qq": {
+            "description": "自定义 QQ 号",
+            "type": "string",
+            "default": "",
+            "condition": {"forward_mode": "custom"}
+          },
+          "rate_limit": {
+            "description": "限速（秒）",
+            "type": "float",
+            "default": 1.0,
+            "slider": {"min": -1, "max": 1, "step": 0.1}
+          },
+          "schedules": {
+            "description": "定时发送",
+            "type": "list",
+            "options": ["每天", "每周", "每月", "周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            "default": []
+          },
+          "schedule_time": {"description": "定时当天具体时间", "type": "string", "default": "23:00"},
+          "target_qq_groups": {
+            "description": "指定发送QQ群",
+            "type": "list",
+            "default": []
+          }
+        }
       }
     }
   },

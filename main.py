@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import math
+import re
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +34,14 @@ COLLECT_COMMAND_USAGE = (
 )
 CUSTOM_SOURCE_COMMANDS: set[str] = set()
 RESERVED_COMMANDS = {"/爬取", "爬取", "/抓取", "抓取"}
+RESERVED_COMMANDS.update({"/pixiv", "pixiv", "/pixiv登陆", "pixiv登陆"})
+PIXIV_HELP = (
+    "Pixiv 专属帮助\n"
+    "/pixiv [Tag1] [Tag2] ... - 搜索同时符合多个 Tag 的图片\n"
+    "/pixiv登陆 - 生成 Pixiv 登录二维码\n"
+    "/pixiv登陆 [URL] - 使用登录后的回调 URL 完成授权\n"
+    "自定义专属指令示例：/p 百合 JK 白丝"
+)
 
 
 def _config_number(value, default: int | float, converter):
@@ -50,6 +60,14 @@ def _command_variants(command: str) -> tuple[str, ...]:
         return ()
     without_slash = value[1:] if value.startswith("/") else value
     return tuple(dict.fromkeys(item for item in (value, without_slash) if item))
+
+
+def _qr_png(value: str) -> bytes:
+    import qrcode
+
+    output = io.BytesIO()
+    qrcode.make(value).save(output, format="PNG")
+    return output.getvalue()
 
 
 def _match_custom_source(
@@ -82,7 +100,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.1.7",
+    "v0.2.0",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -125,7 +143,39 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.1.7 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.2.0 已加载，共 %d 个自定义爬取项", len(self.sources))
+
+    @filter.command("pixiv")
+    async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
+        query = self._after_command(event.message_str)
+        if not query:
+            yield event.plain_result(PIXIV_HELP)
+            return
+        async for result in self._collect_and_reply(
+            event, self._pixiv_sources(), query, (ContentType.IMAGE,)
+        ):
+            yield result
+
+    @filter.command("pixiv登陆")
+    async def pixiv_login_command(self, event: AstrMessageEvent) -> MessageEventResult:
+        if not self.pipeline:
+            yield event.plain_result("Smart Collector 尚未初始化完成。")
+            return
+        callback = self._after_command(event.message_str)
+        try:
+            if callback:
+                await self.pipeline.pixiv.auth.finish(callback)
+                yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
+                return
+            login_url = await self.pipeline.pixiv.auth.start()
+            yield event.chain_result(
+                [
+                    Comp.Image.fromBytes(_qr_png(login_url)),
+                    Comp.Plain("在登陆后使用“/pixiv登陆 [URL]”以登陆"),
+                ]
+            )
+        except Exception as exc:
+            yield event.plain_result(f"Pixiv 登录失败：{exc}")
 
     @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -170,10 +220,20 @@ class SmartCollectorPlugin(Star):
             return
         query_url, query = split_url_request(query)
         target_url = url.strip() or query_url
-        sources = (
-            [self._temporary_source(target_url)] if target_url else self._match_sources(source_name)
-        )
-        explicit_types = normalize_types(content_types) if content_types else None
+        explicit_types: tuple[ContentType, ...] | None = None
+        if not url.strip() and (
+            source_name.strip().casefold() == "pixiv"
+            or (not source_name.strip() and re.search(r"pixiv|p站", query, re.IGNORECASE))
+        ):
+            sources = self._pixiv_sources()
+            explicit_types = (ContentType.IMAGE,)
+        else:
+            sources = (
+                [self._temporary_source(target_url)]
+                if target_url
+                else self._match_sources(source_name)
+            )
+        explicit_types = normalize_types(content_types) if content_types else explicit_types
         async for result in self._collect_and_reply(event, sources, query, explicit_types):
             yield result
 
@@ -257,7 +317,8 @@ class SmartCollectorPlugin(Star):
         content: list = []
         path = str(asset.local_path) if asset.local_path else ""
         if asset.mime_type in {"application/pdf", "application/zip"}:
-            content.append(Comp.File(name=asset.title or Path(path).name, file=path))
+            file_name = "炸金~❤️.pdf" if asset.mime_type == "application/pdf" else asset.title
+            content.append(Comp.File(name=file_name or Path(path).name, file=path))
         elif asset.content_type is ContentType.IMAGE:
             content.append(Comp.Image.fromFileSystem(path))
         elif asset.content_type is ContentType.VIDEO:
@@ -406,6 +467,9 @@ class SmartCollectorPlugin(Star):
         needle = name.strip().casefold()
         exact = [source for source in enabled if source.name.casefold() == needle]
         return exact or [source for source in enabled if needle in source.name.casefold()]
+
+    def _pixiv_sources(self) -> list[SourceConfig]:
+        return [source for source in self.sources if source.enabled and source.template == "pixiv"]
 
     @staticmethod
     def _temporary_source(url: str) -> SourceConfig:
