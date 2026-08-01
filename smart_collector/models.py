@@ -216,6 +216,8 @@ class Candidate:
     source_kind: str = ""
     in_main_content: bool = False
     content_length: int = 0
+    group_key: str = ""
+    page_index: int = 0
 
 
 @dataclass(slots=True)
@@ -231,6 +233,8 @@ class CollectedAsset:
     local_path: Path | None = None
     cached: bool = False
     summary: str = ""
+    attachments: list[CollectedAsset] = field(default_factory=list)
+    history_keys: tuple[str, ...] = ()
 
     @property
     def exists(self) -> bool:

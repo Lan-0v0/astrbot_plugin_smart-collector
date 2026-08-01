@@ -443,7 +443,12 @@ class PixivCollector:
             tags = " ".join(
                 str(_value(tag, "name", "") or "") for tag in (_value(illust, "tags", []) or [])
             )
-            for url, width, height in _pixiv_image_urls(illust):
+            image_urls = _pixiv_image_urls(illust)
+            illust_id = str(_value(illust, "id", "") or "").strip()
+            if not illust_id and image_urls:
+                illust_id = hashlib.sha1(image_urls[0][0].encode()).hexdigest()[:20]
+            group_key = f"pixiv:{illust_id}"
+            for page_index, (url, width, height) in enumerate(image_urls):
                 if url in seen:
                     continue
                 seen.add(url)
@@ -457,6 +462,8 @@ class PixivCollector:
                         height=height,
                         context_text=tags,
                         source_kind="pixiv_api",
+                        group_key=group_key,
+                        page_index=page_index,
                     )
                 )
         if not candidates:

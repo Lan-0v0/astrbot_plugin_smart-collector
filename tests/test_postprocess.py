@@ -1,4 +1,5 @@
 import asyncio
+import re
 from pathlib import Path
 
 import pyzipper
@@ -32,5 +33,48 @@ def test_pdf_and_password_zip(tmp_path: Path) -> None:
         with pyzipper.AESZipFile(archive.local_path) as zipped:
             zipped.setpassword(b"secret")
             assert zipped.read("transparent.png") == image_path.read_bytes()
+
+    asyncio.run(scenario())
+
+
+def test_multi_image_pdf_and_zip_include_every_page(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        first_path = tmp_path / "page.png"
+        second_path = tmp_path / "second" / "page.png"
+        second_path.parent.mkdir()
+        Image.new("RGB", (32, 32), "red").save(first_path)
+        Image.new("RGB", (32, 32), "blue").save(second_path)
+        first = CollectedAsset(
+            asset_key="first",
+            source_key="source",
+            source_name="Source",
+            content_type=ContentType.IMAGE,
+            origin_url="https://example.com/first.png",
+            mime_type="image/png",
+            local_path=first_path,
+        )
+        second = CollectedAsset(
+            asset_key="second",
+            source_key="source",
+            source_name="Source",
+            content_type=ContentType.IMAGE,
+            origin_url="https://example.com/second.png",
+            mime_type="image/png",
+            local_path=second_path,
+        )
+        first.attachments = [second]
+        first.history_keys = (first.asset_key, second.asset_key)
+        processor = PostProcessor(tmp_path / "output")
+
+        pdf = await processor.image_to_pdf(first)
+        assert pdf.local_path
+        assert len(re.findall(rb"/Type\s*/Page\b", pdf.local_path.read_bytes())) == 2
+        assert pdf.history_keys == ("first", "second")
+
+        archive = await processor.compress(first)
+        assert archive.local_path
+        with pyzipper.AESZipFile(archive.local_path) as zipped:
+            assert sorted(zipped.namelist()) == ["page.png", "page_1.png"]
+        assert archive.history_keys == ("first", "second")
 
     asyncio.run(scenario())

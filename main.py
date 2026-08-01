@@ -101,7 +101,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.2.1",
+    "v0.2.2",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -144,7 +144,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.2.1 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.2.2 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -295,8 +295,11 @@ class SmartCollectorPlugin(Star):
                     event.get_sender_id(),
                     event.get_sender_name(),
                 )
+            try:
+                await self.pipeline.mark_sent(source, asset, self.cache_days)
+            except Exception:
+                logger.exception("数据源 %s 的发送历史记录失败", source.name)
             yield result
-            await self.pipeline.mark_sent(source, asset, self.cache_days)
         except CollectionError as exc:
             yield event.plain_result(str(exc))
         except Exception as exc:
@@ -327,20 +330,24 @@ class SmartCollectorPlugin(Star):
         sender_name: str = "",
     ) -> list:
         content: list = []
-        path = str(asset.local_path) if asset.local_path else ""
-        if asset.mime_type in {"application/pdf", "application/zip"}:
-            file_name = "炸金~❤️.pdf" if asset.mime_type == "application/pdf" else asset.title
-            content.append(Comp.File(name=file_name or Path(path).name, file=path))
-        elif asset.content_type is ContentType.IMAGE:
-            content.append(Comp.Image.fromFileSystem(path))
-        elif asset.content_type is ContentType.VIDEO:
-            content.append(Comp.Video.fromFileSystem(path))
-        elif asset.content_type is ContentType.AUDIO:
-            content.append(Comp.Record.fromFileSystem(path))
-        else:
-            text = asset.summary or asset.text
-            content.append(Comp.Plain(text[:20_000]))
-        if source.forward_mode == "none":
+        assets = (asset, *asset.attachments)
+        contains_file = False
+        for item in assets:
+            path = str(item.local_path) if item.local_path else ""
+            if item.mime_type in {"application/pdf", "application/zip"}:
+                file_name = "炸金~❤️.pdf" if item.mime_type == "application/pdf" else item.title
+                content.append(Comp.File(name=file_name or Path(path).name, file=path))
+                contains_file = True
+            elif item.content_type is ContentType.IMAGE:
+                content.append(Comp.Image.fromFileSystem(path))
+            elif item.content_type is ContentType.VIDEO:
+                content.append(Comp.Video.fromFileSystem(path))
+            elif item.content_type is ContentType.AUDIO:
+                content.append(Comp.Record.fromFileSystem(path))
+            else:
+                text = item.summary or item.text
+                content.append(Comp.Plain(text[:20_000]))
+        if source.forward_mode == "none" or contains_file:
             return content
         uin = source.custom_qq if source.forward_mode == "custom" else sender_id
         name = source.name if source.forward_mode == "custom" else (sender_name or source.name)

@@ -234,6 +234,77 @@ def test_pipeline_reuses_cached_media(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Path) -> None:
+    class PixivImageFetcher:
+        def __init__(self) -> None:
+            self.downloads: list[str] = []
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads.append(url)
+            color = "red" if "/work-a/" in url else "blue"
+            page = int(url.rsplit("/p", 1)[1].split(".", 1)[0])
+            output = io.BytesIO()
+            Image.new("RGB", (64 + page, 64), color).save(output, "PNG")
+            body = output.getvalue()
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "image/png",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fetcher = PixivImageFetcher()
+        pipeline.fetcher = fetcher  # type: ignore[assignment]
+        source = SourceConfig.from_mapping(
+            {
+                "__template_key": "pixiv",
+                "name": "Pixiv",
+                "dedupe": 0,
+                "rate_limit": -1,
+            }
+        )
+        candidates = [
+            Candidate(
+                ContentType.IMAGE,
+                url=f"https://i.pximg.test/{work}/p{page}.png",
+                referer="https://www.pixiv.net/",
+                group_key=f"pixiv:{work}",
+                page_index=page,
+            )
+            for work in ("work-a", "work-b")
+            for page in (0, 1)
+        ]
+
+        first = await pipeline._collect_pixiv_work(source, candidates, "百合")
+        assert first and len(first.attachments) == 1
+        first_work = first.origin_url.split("/")[-2]
+        assert first.attachments[0].origin_url.split("/")[-2] == first_work
+        assert len(first.history_keys) == 2
+        await pipeline.mark_sent(source, first)
+
+        second = await pipeline._collect_pixiv_work(source, candidates, "百合")
+        assert second and len(second.attachments) == 1
+        second_work = second.origin_url.split("/")[-2]
+        assert second_work != first_work
+        await pipeline.mark_sent(source, second)
+        assert await pipeline._collect_pixiv_work(source, candidates, "百合") is None
+        assert sorted(fetcher.downloads) == sorted(item.url for item in candidates)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_cached_candidate_skips_probe_and_download(tmp_path: Path) -> None:
     class NoNetworkFetcher:
         def __init__(self) -> None:

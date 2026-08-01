@@ -84,6 +84,8 @@ class CollectorPipeline:
         self._rng = rng or random.SystemRandom()
         self._rate_lock = asyncio.Lock()
         self._last_requests: dict[tuple[str, str], float] = {}
+        self._pixiv_selection_lock = asyncio.Lock()
+        self._pixiv_reserved: dict[str, set[str]] = {}
 
     async def initialize(self) -> None:
         await self.cache.initialize()
@@ -136,14 +138,9 @@ class CollectorPipeline:
         if source.template == "pixiv":
             try:
                 candidates = await self.pixiv.candidates(source, query)
-                asset = await self._try_candidates(
-                    source,
-                    FetchResponse(source.url, 200, "application/json", b""),
-                    candidates,
-                    query,
-                )
+                asset = await self._collect_pixiv_work(source, candidates, query)
                 if asset is None:
-                    raise PixivError("Pixiv 候选均已去重或无法下载")
+                    raise PixivError("Pixiv 作品均已去重或无法完整下载")
             except PixivError as exc:
                 raise CollectionError(str(exc)) from exc
             if source.image_to_pdf and asset.content_type is ContentType.IMAGE:
@@ -224,10 +221,103 @@ class CollectorPipeline:
     async def mark_sent(
         self, source: SourceConfig, asset: CollectedAsset, cache_days: int = 7
     ) -> None:
-        base_key = asset.asset_key.split(":pdf", 1)[0].split(":zip", 1)[0]
-        await self.cache.mark_sent(source.key, base_key)
+        keys = asset.history_keys or (asset.asset_key,)
+        base_keys = tuple(
+            dict.fromkeys(asset_key.split(":pdf", 1)[0].split(":zip", 1)[0] for asset_key in keys)
+        )
+        try:
+            for base_key in base_keys:
+                await self.cache.mark_sent(source.key, base_key)
+        finally:
+            async with self._pixiv_selection_lock:
+                reserved = self._pixiv_reserved.get(source.key)
+                if reserved is not None:
+                    reserved.difference_update(base_keys)
+                    if not reserved:
+                        self._pixiv_reserved.pop(source.key, None)
         if cache_days == 0:
             await self.cache.cleanup({source.key: 0})
+
+    async def _collect_pixiv_work(
+        self,
+        source: SourceConfig,
+        candidates: list[Candidate],
+        query: str,
+    ) -> CollectedAsset | None:
+        groups: dict[str, list[Candidate]] = {}
+        for candidate in self.extractor._dedupe(candidates):
+            key = candidate.group_key or candidate.url
+            groups.setdefault(key, []).append(candidate)
+        group_keys = list(groups)
+        self._rng.shuffle(group_keys)
+        source_response = FetchResponse(source.url, 200, "application/json", b"")
+
+        async def materialize_page(
+            page: Candidate, cached_asset: CollectedAsset | None
+        ) -> CollectedAsset:
+            if cached_asset is not None:
+                return cached_asset
+            return await self._materialize(source, page, source_response)
+
+        for group_key in group_keys[:100]:
+            pages = sorted(groups[group_key], key=lambda item: item.page_index)
+            cached = await asyncio.gather(
+                *(self.cache.get_asset_by_origin(source.key, page.url) for page in pages)
+            )
+            cached_allowed = await asyncio.gather(
+                *(
+                    self.cache.is_allowed(source.key, asset.asset_key, source.dedupe)
+                    for asset in cached
+                    if asset is not None
+                )
+            )
+            if not all(cached_allowed):
+                continue
+            results = await asyncio.gather(
+                *(materialize_page(page, asset) for page, asset in zip(pages, cached, strict=True)),
+                return_exceptions=True,
+            )
+            if any(isinstance(result, BaseException) for result in results):
+                continue
+            assets = [result for result in results if isinstance(result, CollectedAsset)]
+            if len(assets) != len(pages):
+                continue
+            allowed = await asyncio.gather(
+                *(
+                    self.cache.is_allowed(source.key, asset.asset_key, source.dedupe)
+                    for asset in assets
+                )
+            )
+            if not all(allowed):
+                continue
+            matches = await asyncio.gather(
+                *(
+                    self._image_asset_matches(asset, page, query, file_validated=True)
+                    for asset, page in zip(assets, pages, strict=True)
+                )
+            )
+            if not all(matches):
+                continue
+            asset_keys = tuple(asset.asset_key for asset in assets)
+            if source.dedupe >= 0:
+                async with self._pixiv_selection_lock:
+                    reserved = self._pixiv_reserved.setdefault(source.key, set())
+                    if reserved.intersection(asset_keys):
+                        continue
+                    still_allowed = await asyncio.gather(
+                        *(
+                            self.cache.is_allowed(source.key, asset_key, source.dedupe)
+                            for asset_key in asset_keys
+                        )
+                    )
+                    if not all(still_allowed):
+                        continue
+                    reserved.update(asset_keys)
+            primary = assets[0]
+            primary.attachments = assets[1:]
+            primary.history_keys = asset_keys
+            return primary
+        return None
 
     async def cleanup(self, sources: list[SourceConfig], cache_days: int = 7) -> int:
         return await self.cache.cleanup_all(cache_days)

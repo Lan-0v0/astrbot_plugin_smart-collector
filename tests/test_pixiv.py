@@ -97,6 +97,8 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
         ]
         assert all(item.content_type is ContentType.IMAGE for item in candidates)
         assert all(item.referer == "https://www.pixiv.net/" for item in candidates)
+        assert len({item.group_key for item in candidates}) == 1
+        assert [item.page_index for item in candidates] == [0, 1]
 
     asyncio.run(scenario())
 

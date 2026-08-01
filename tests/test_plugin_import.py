@@ -123,6 +123,26 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert len(forwarded[0].kwargs["content"]) == 1
     assert type(forwarded[0].kwargs["content"][0]).__name__ == "Image"
 
+    forwarded_pdf = plugin._build_chain(source, pdf_asset, "10001", "用户")
+    assert len(forwarded_pdf) == 1
+    assert type(forwarded_pdf[0]).__name__ == "File"
+    assert forwarded_pdf[0].kwargs["file"] == str(ROOT / "random.pdf")
+
+    second_image = module.CollectedAsset(
+        asset_key="asset-2",
+        source_key=source.key,
+        source_name=source.name,
+        content_type=module.ContentType.IMAGE,
+        origin_url="https://cdn.example/image-2.jpg",
+        mime_type="image/jpeg",
+        local_path=ROOT / "image-2.jpg",
+    )
+    asset.attachments = [second_image]
+    forwarded_album = plugin._build_chain(source, asset, "10001", "用户")
+    assert type(forwarded_album[0]).__name__ == "Node"
+    assert len(forwarded_album[0].kwargs["content"]) == 2
+    asset.attachments = []
+
     class CommandEvent:
         message_str = "/爬取"
 
@@ -159,6 +179,46 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         assert results[1] == "Pixiv 登录成功，Refresh Token 已保存。"
 
     asyncio.run(local_login_scenario())
+
+    class ReplyPipeline:
+        def __init__(self):
+            self.marked = []
+
+        async def collect_many(self, sources, wanted, user_key, query):
+            return sources[0], asset
+
+        async def mark_sent(self, marked_source, marked_asset, cache_days):
+            self.marked.append((marked_source, marked_asset))
+
+    class ReplyEvent:
+        unified_msg_origin = "platform:Message:user"
+
+        @staticmethod
+        def get_sender_id():
+            return "10001"
+
+        @staticmethod
+        def get_sender_name():
+            return "用户"
+
+        @staticmethod
+        def chain_result(chain):
+            return chain
+
+        @staticmethod
+        def plain_result(value):
+            return value
+
+    async def first_result_marks_history_before_generator_resumes() -> None:
+        reply_pipeline = ReplyPipeline()
+        plugin.pipeline = reply_pipeline
+        source.forward_mode = "none"
+        generator = plugin._collect_and_reply(ReplyEvent(), [source], "")
+        await generator.__anext__()
+        assert reply_pipeline.marked == [(source, asset)]
+        await generator.aclose()
+
+    asyncio.run(first_result_marks_history_before_generator_resumes())
 
     movie_source = module.SourceConfig.from_mapping(
         {
