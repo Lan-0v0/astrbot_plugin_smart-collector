@@ -202,7 +202,7 @@
       },
       "pixiv": {
         "name": "Pixiv",
-        "hint": "使用 Pixiv App API 按 Tag 搜索插画。首次使用请通过 /pixiv登陆 获取 Refresh Token。",
+        "hint": "使用 Pixiv App API 按 Tag 搜索插画。首次使用请通过 /pixiv本地登陆 或 /pixiv远程登陆 获取 Refresh Token。",
         "display_item": "name",
         "hide_hint_in_list": true,
         "items": {

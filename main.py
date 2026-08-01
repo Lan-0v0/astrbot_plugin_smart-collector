@@ -24,6 +24,7 @@ from .smart_collector.models import (
     CollectedAsset,
     ContentType,
     SourceConfig,
+    normalize_bool,
     normalize_types,
 )
 from .smart_collector.pipeline import CollectionError, CollectorPipeline
@@ -33,15 +34,19 @@ COLLECT_COMMAND_USAGE = (
     "爬虫指令规范为：/爬取 [URL] [类型]\n其中URL为必须项，类型（视频/图片/音频/文字）为不必须项"
 )
 CUSTOM_SOURCE_COMMANDS: set[str] = set()
-RESERVED_COMMANDS = {"/爬取", "爬取", "/抓取", "抓取"}
-RESERVED_COMMANDS.update({"/pixiv", "pixiv", "/pixiv登陆", "pixiv登陆"})
 PIXIV_HELP = (
-    "Pixiv 专属帮助\n"
-    "/pixiv [Tag1] [Tag2] ... - 搜索同时符合多个 Tag 的图片\n"
-    "/pixiv登陆 - 生成 Pixiv 登录二维码\n"
-    "/pixiv登陆 本地 - 在本机浏览器中登录并自动获取授权\n"
-    "/pixiv登陆 [URL] - 使用登录后的回调 URL 完成授权\n"
-    "自定义专属指令示例：/p 百合 JK 白丝"
+    "Pixiv（P站）图像采集专属帮助\n\n"
+    "根据单/多tag随机爬图：\n"
+    "/pixiv [Tag1] [Tag2] ... r18\n"
+    "例如/pixiv 百合 jk r18，加上r18后会限制年龄段类型，"
+    "不加则默认包含全年龄＋R18\n"
+    "tips：可在配置面板中新建独特的专属指令\n\n"
+    "登陆\n"
+    "在bot部署的本地端上跳转网站登陆：\n"
+    "/pixiv本地登陆\n"
+    "远程登陆获取二维码/链接：\n"
+    "/pixiv远程登陆\n"
+    "/pixiv远程登陆 [URL] ——用指令回报code完成登陆"
 )
 
 
@@ -63,6 +68,34 @@ def _command_variants(command: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in (value, without_slash) if item))
 
 
+BUILTIN_COMMANDS = (
+    "/爬取",
+    "/抓取",
+    "/pixiv",
+    "/pixiv本地登陆",
+    "/pixiv远程登陆",
+)
+RESERVED_COMMANDS = {
+    variant for command in BUILTIN_COMMANDS for variant in _command_variants(command)
+}
+
+
+def _command_arguments(message: str, command: str) -> str | None:
+    """Return command arguments when the message contains this exact command."""
+    text = str(message or "").strip()
+    if not text:
+        return None
+    for command_variant in _command_variants(command):
+        match = re.match(
+            rf"^{re.escape(command_variant)}(?:\s+(?P<arguments>.*))?$",
+            text,
+            flags=re.DOTALL,
+        )
+        if match:
+            return (match.group("arguments") or "").strip()
+    return None
+
+
 def _qr_png(value: str) -> bytes:
     import qrcode
 
@@ -74,17 +107,15 @@ def _qr_png(value: str) -> bytes:
 def _match_custom_source(
     message: str, sources: list[SourceConfig]
 ) -> tuple[SourceConfig | None, str]:
-    text = message.strip()
     for source in sources:
         if not source.enabled:
             continue
-        for command in _command_variants(source.command):
-            if command in RESERVED_COMMANDS:
-                continue
-            if text == command:
-                return source, ""
-            if text.startswith(command + " "):
-                return source, text[len(command) :].strip()
+        command_variants = _command_variants(source.command)
+        if any(command in RESERVED_COMMANDS for command in command_variants):
+            continue
+        arguments = _command_arguments(message, source.command)
+        if arguments is not None:
+            return source, arguments
     return None, ""
 
 
@@ -92,8 +123,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
         message = event.get_message_str().strip()
         return any(
-            message == command or message.startswith(command + " ")
-            for command in CUSTOM_SOURCE_COMMANDS
+            _command_arguments(message, command) is not None for command in CUSTOM_SOURCE_COMMANDS
         )
 
 
@@ -101,7 +131,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.2.2",
+    "v0.3.0",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -119,21 +149,28 @@ class SmartCollectorPlugin(Star):
         self.summary_provider = str(config.get("summary_provider") or "")
         self.summary_prompt = str(config.get("summary_prompt") or DEFAULT_SUMMARY_PROMPT)
         self.cache_days = int(_config_number(config.get("cache_days", 7), 7, int))
+        self.cache_days = -1 if self.cache_days < 0 else min(7, self.cache_days)
         self.pipeline: CollectorPipeline | None = None
         self._tasks: list[asyncio.Task] = []
 
     async def initialize(self) -> None:
         data_dir = StarTools.get_data_dir("astrbot_plugin_smart_collector")
+        image_ignore_size_kb = int(
+            _config_number(self.config.get("image_ignore_size_kb", 100), 100, int)
+        )
+        image_ignore_size_kb = -1 if image_ignore_size_kb < 0 else image_ignore_size_kb
+        concurrency = int(_config_number(self.config.get("concurrency", -1), -1, int))
+        concurrency = -1 if concurrency < 0 else concurrency
+        timeout = float(_config_number(self.config.get("request_timeout", -1), -1, float))
+        timeout = -1.0 if timeout < 0 else max(0.1, timeout)
         self.pipeline = CollectorPipeline(
             data_dir,
-            image_ignore_size_kb=int(
-                _config_number(self.config.get("image_ignore_size_kb", 100), 100, int)
-            ),
-            concurrency=int(_config_number(self.config.get("concurrency", -1), -1, int)),
-            timeout=float(_config_number(self.config.get("request_timeout", -1), -1, float)),
+            image_ignore_size_kb=image_ignore_size_kb,
+            concurrency=concurrency,
+            timeout=timeout,
         )
         await self.pipeline.initialize()
-        if not bool(self.config.get("natural_language_enabled", True)):
+        if not normalize_bool(self.config.get("natural_language_enabled", True), True):
             with suppress(Exception):
                 deactivate = getattr(self.context, "deactivate_llm_tool", None)
                 if callable(deactivate):
@@ -144,33 +181,40 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.2.2 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.3.0 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
-        query = self._after_command(event.message_str)
+        query = _command_arguments(event.message_str, "/pixiv") or ""
         if not query:
             yield event.plain_result(PIXIV_HELP)
             return
         async for result in self._collect_and_reply(
-            event, self._pixiv_sources(), query, (ContentType.IMAGE,)
+            event, [self._default_pixiv_source()], query, (ContentType.IMAGE,)
         ):
             yield result
 
-    @filter.command("pixiv登陆")
-    async def pixiv_login_command(self, event: AstrMessageEvent) -> MessageEventResult:
+    @filter.command("pixiv本地登陆")
+    async def pixiv_local_login_command(self, event: AstrMessageEvent) -> MessageEventResult:
         if not self.pipeline:
             yield event.plain_result("Smart Collector 尚未初始化完成。")
             return
-        callback = self._after_command(event.message_str)
         try:
-            if callback == "本地":
-                yield event.plain_result(
-                    "已打开本地 Pixiv 登录窗口，请在十分钟内完成登录，插件将自动获取授权。"
-                )
-                await self.pipeline.pixiv.auth.login_local()
-                yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
-                return
+            yield event.plain_result(
+                "已打开本地 Pixiv 登录窗口，请在十分钟内完成登录，插件将自动获取授权。"
+            )
+            await self.pipeline.pixiv.auth.login_local()
+            yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
+        except Exception as exc:
+            yield event.plain_result(f"Pixiv 登录失败：{exc}")
+
+    @filter.command("pixiv远程登陆")
+    async def pixiv_remote_login_command(self, event: AstrMessageEvent) -> MessageEventResult:
+        if not self.pipeline:
+            yield event.plain_result("Smart Collector 尚未初始化完成。")
+            return
+        callback = _command_arguments(event.message_str, "/pixiv远程登陆") or ""
+        try:
             if callback:
                 await self.pipeline.pixiv.auth.finish(callback)
                 yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
@@ -180,7 +224,8 @@ class SmartCollectorPlugin(Star):
                 [
                     Comp.Image.fromBytes(_qr_png(login_url)),
                     Comp.Plain(
-                        "在登陆后使用“/pixiv登陆 [URL]”以登陆\n"
+                        f"登录链接：{login_url}\n"
+                        "在登陆后使用“/pixiv远程登陆 [URL]”以登陆\n"
                         "请复制最终包含 code 的 pixiv://account/login 回调地址；"
                         "accounts.pixiv.net/post-redirect 中间地址不能用于登录。"
                     ),
@@ -192,7 +237,9 @@ class SmartCollectorPlugin(Star):
     @filter.command("爬取", alias={"抓取"})
     async def collect_command(self, event: AstrMessageEvent) -> MessageEventResult:
         """爬取指定 URL；可指定视频、图片、音频或文字。"""
-        query = self._after_command(event.message_str)
+        query = _command_arguments(event.message_str, "/爬取")
+        if query is None:
+            query = _command_arguments(event.message_str, "/抓取") or ""
         url, query = split_url_request(query)
         if not url:
             yield event.plain_result(COLLECT_COMMAND_USAGE)
@@ -227,7 +274,7 @@ class SmartCollectorPlugin(Star):
             content_types(array[string]): 可选内容类型，只能使用 video、audio、image、text
             url(string): 可选的临时 HTTP/HTTPS 抓取地址；提供后不使用已配置数据源
         """
-        if not bool(self.config.get("natural_language_enabled", True)):
+        if not normalize_bool(self.config.get("natural_language_enabled", True), True):
             yield event.plain_result("自然语言爬取已在插件配置中关闭。")
             return
         query_url, query = split_url_request(query)
@@ -491,6 +538,26 @@ class SmartCollectorPlugin(Star):
         return [source for source in self.sources if source.enabled and source.template == "pixiv"]
 
     @staticmethod
+    def _default_pixiv_source() -> SourceConfig:
+        return SourceConfig(
+            key="pixiv:__builtin__",
+            template="pixiv",
+            name="Pixiv 默认指令",
+            enabled=True,
+            url="https://app-api.pixiv.net/",
+            content_types=(ContentType.IMAGE,),
+            command="/pixiv",
+            dedupe=0,
+            image_to_pdf=False,
+            compress=False,
+            forward_mode="none",
+            rate_limit=1.0,
+            schedules=(),
+            pixiv_age_mode="all",
+            pixiv_r18_to_pdf=True,
+        )
+
+    @staticmethod
     def _temporary_source(url: str) -> SourceConfig:
         return SourceConfig.from_mapping(
             {
@@ -504,8 +571,3 @@ class SmartCollectorPlugin(Star):
                 "rate_limit": -1,
             }
         )
-
-    @staticmethod
-    def _after_command(message: str) -> str:
-        parts = message.strip().split(maxsplit=1)
-        return parts[1] if len(parts) == 2 else ""

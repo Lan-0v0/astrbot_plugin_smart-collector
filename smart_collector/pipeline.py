@@ -143,7 +143,9 @@ class CollectorPipeline:
                     raise PixivError("Pixiv 作品均已去重或无法完整下载")
             except PixivError as exc:
                 raise CollectionError(str(exc)) from exc
-            if source.image_to_pdf and asset.content_type is ContentType.IMAGE:
+            if (
+                source.image_to_pdf or (source.pixiv_r18_to_pdf and asset.r18)
+            ) and asset.content_type is ContentType.IMAGE:
                 asset = await self.postprocessor.image_to_pdf(asset)
             if source.compress and asset.content_type in {ContentType.IMAGE, ContentType.VIDEO}:
                 asset = await self.postprocessor.compress(asset, source.compression_password)
@@ -314,8 +316,11 @@ class CollectorPipeline:
                         continue
                     reserved.update(asset_keys)
             primary = assets[0]
+            for page_asset, page in zip(assets, pages, strict=True):
+                page_asset.r18 = page.r18
             primary.attachments = assets[1:]
             primary.history_keys = asset_keys
+            primary.r18 = any(page.r18 for page in pages)
             return primary
         return None
 
@@ -898,6 +903,10 @@ class CollectorPipeline:
         return asset
 
     async def _materialize_hls(self, source: SourceConfig, candidate: Candidate) -> CollectedAsset:
+        try:
+            AntiBotFetcher._validate_url(candidate.url)
+        except FetchError as exc:
+            raise CollectionError(str(exc)) from exc
         try:
             import yt_dlp
         except ImportError as exc:

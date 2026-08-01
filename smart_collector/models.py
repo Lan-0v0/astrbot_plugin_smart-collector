@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -31,6 +32,17 @@ CONTENT_LABELS = {
     "文字": ContentType.TEXT,
     "文本": ContentType.TEXT,
 }
+
+
+def safe_output_name(value: str) -> str:
+    """Convert an asset key into a stable single path component."""
+    normalized = re.sub(r'[<>:"/\\|?*]+', "_", str(value)).strip(" .")
+    if not normalized or normalized in {".", ".."}:
+        return "asset"
+    if len(normalized) <= 200:
+        return normalized
+    suffix = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:32]
+    return f"{normalized[:160]}_{suffix}"
 
 
 def normalize_time(value: Any) -> str:
@@ -64,6 +76,21 @@ def normalize_types(values: Any) -> tuple[ContentType, ...]:
 
 def normalize_video_quality(value: Any) -> str:
     return "highest" if str(value).strip().lower() == "highest" else "lowest"
+
+
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on", "y", "是", "开启", "启用"}:
+        return True
+    if normalized in {"false", "0", "no", "off", "n", "否", "关闭", "禁用", ""}:
+        return False
+    return default
 
 
 def _safe_number(value: Any, default: int | float, converter: type[int] | type[float]):
@@ -100,6 +127,7 @@ class SourceConfig:
     target_qq_groups: tuple[str, ...] = ()
     pixiv_refresh_token: str = ""
     pixiv_age_mode: str = "all"
+    pixiv_r18_to_pdf: bool = False
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
@@ -133,6 +161,7 @@ class SourceConfig:
         dedupe = int(_safe_number(value.get("dedupe", 0), 0, int))
         dedupe = -1 if dedupe < 0 else 0
         rate_limit = float(_safe_number(value.get("rate_limit", 1.0), 1.0, float))
+        rate_limit = -1.0 if rate_limit < 0 else min(1.0, rate_limit)
         forward_mode = str(value.get("forward_mode") or "user")
         if forward_mode not in {"none", "user", "custom"}:
             forward_mode = "user"
@@ -152,7 +181,7 @@ class SourceConfig:
             key=f"{template}:{name}:{hashlib.sha1(url.encode()).hexdigest()[:10]}",
             template=template,
             name=name,
-            enabled=bool(value.get("enabled", True)),
+            enabled=normalize_bool(value.get("enabled", True), True),
             url=url,
             content_types=content_types,
             command=command,
@@ -160,8 +189,8 @@ class SourceConfig:
             video_quality=normalize_video_quality(value.get("video_quality")),
             cookies=tuple(str(item).strip() for item in cookies if str(item).strip()),
             headers=headers,
-            image_to_pdf=bool(value.get("image_to_pdf", False)),
-            compress=bool(value.get("compress", False)),
+            image_to_pdf=normalize_bool(value.get("image_to_pdf", False)),
+            compress=normalize_bool(value.get("compress", False)),
             compression_password=str(value.get("compression_password") or ""),
             forward_mode=forward_mode,
             custom_qq=str(value.get("custom_qq") or ""),
@@ -175,6 +204,7 @@ class SourceConfig:
             ),
             pixiv_refresh_token=pixiv_refresh_token,
             pixiv_age_mode=pixiv_age_mode,
+            pixiv_r18_to_pdf=normalize_bool(value.get("pixiv_r18_to_pdf", False)),
         )
 
 
@@ -218,6 +248,7 @@ class Candidate:
     content_length: int = 0
     group_key: str = ""
     page_index: int = 0
+    r18: bool = False
 
 
 @dataclass(slots=True)
@@ -235,6 +266,7 @@ class CollectedAsset:
     summary: str = ""
     attachments: list[CollectedAsset] = field(default_factory=list)
     history_keys: tuple[str, ...] = ()
+    r18: bool = False
 
     @property
     def exists(self) -> bool:

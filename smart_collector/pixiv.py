@@ -218,7 +218,7 @@ class PixivAuthManager:
     async def finish(self, callback: str) -> None:
         pending = self.pending
         if pending is None or datetime.now(timezone.utc).timestamp() - pending.created_at > 600:
-            raise PixivError("Pixiv 登录二维码已过期，请重新发送 /pixiv登陆")
+            raise PixivError("Pixiv 登录授权已过期，请重新发起登录")
         value = str(callback or "").strip()
         params = _oauth_callback_params(value)
         code = (params.get("code") or [""])[0]
@@ -367,7 +367,7 @@ class PixivAuthManager:
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
-                    raise PixivError("本地 Pixiv 登录已超时，请重新发送 /pixiv登陆 本地")
+                    raise PixivError("本地 Pixiv 登录已超时，请重新发送 /pixiv本地登陆")
                 try:
                     message = await asyncio.wait_for(connection.recv(), min(remaining, 1.0))
                 except TimeoutError:
@@ -417,7 +417,9 @@ class PixivCollector:
     async def candidates(self, source: SourceConfig, query: str) -> list[Candidate]:
         token = source.pixiv_refresh_token or await self.auth.load_refresh_token()
         if not token:
-            raise PixivError("Pixiv 未配置 Refresh Token，请先使用 /pixiv登陆")
+            raise PixivError(
+                "Pixiv 未配置 Refresh Token，请先使用 /pixiv本地登陆 或 /pixiv远程登陆"
+            )
         word, age = parse_pixiv_query(query, source.pixiv_age_mode)
         client = await self._client(token)
         lock = self._locks[token]
@@ -464,6 +466,7 @@ class PixivCollector:
                         source_kind="pixiv_api",
                         group_key=group_key,
                         page_index=page_index,
+                        r18=restrict != 0,
                     )
                 )
         if not candidates:

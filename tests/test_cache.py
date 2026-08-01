@@ -62,6 +62,41 @@ def test_cleanup_preserves_files_referenced_by_another_source(tmp_path: Path) ->
         assert shared.exists()
         assert await store.cleanup_all(0) == 1
         assert not shared.exists()
+        assert store.files_dir.exists()
+        await store.close()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_removes_pdf_and_zip_outputs_with_colon_asset_keys(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = CacheStore(tmp_path)
+        await store.initialize()
+        cached_file = store.files_dir / "image.jpg"
+        cached_file.write_bytes(b"image")
+        asset = CollectedAsset(
+            asset_key="pixiv:__builtin__:image",
+            source_key="pixiv:__builtin__",
+            source_name="Pixiv 默认指令",
+            content_type=ContentType.IMAGE,
+            origin_url="https://i.pximg.net/image.jpg",
+            local_path=cached_file,
+        )
+        await store.save_asset(asset)
+
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        derived_name = asset.asset_key.replace(":", "_")
+        (output_dir / f"{derived_name}.zip").write_bytes(b"zip")
+        (output_dir / derived_name).mkdir()
+        (output_dir / derived_name / "炸金~❤️.pdf").write_bytes(b"pdf")
+        (output_dir / f"{derived_name}.zip.bak").write_bytes(b"keep")
+
+        assert await store.cleanup({asset.source_key: 0}) == 1
+        assert not cached_file.exists()
+        assert not (output_dir / f"{derived_name}.zip").exists()
+        assert not (output_dir / derived_name).exists()
+        assert (output_dir / f"{derived_name}.zip.bak").exists()
         await store.close()
 
     asyncio.run(scenario())

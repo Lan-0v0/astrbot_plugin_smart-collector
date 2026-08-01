@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .models import CollectedAsset, ContentType
+from .models import CollectedAsset, ContentType, safe_output_name
 
 
 class PostProcessor:
@@ -18,7 +18,7 @@ class PostProcessor:
         if asset.content_type is not ContentType.IMAGE or not asset.local_path:
             return asset
         images = [item for item in (asset, *asset.attachments) if item.local_path]
-        target_dir = self.output_dir / asset.asset_key.replace(":", "_")
+        target_dir = self.output_dir / safe_output_name(asset.asset_key)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / "炸金~❤️.pdf"
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -43,6 +43,7 @@ class PostProcessor:
             local_path=target,
             cached=asset.cached,
             history_keys=asset.history_keys or tuple(item.asset_key for item in images),
+            r18=asset.r18,
         )
 
     @staticmethod
@@ -80,7 +81,7 @@ class PostProcessor:
         if not asset.local_path:
             return asset
         assets = [item for item in (asset, *asset.attachments) if item.local_path]
-        target = self.output_dir / f"{asset.asset_key.replace(':', '_')}.zip"
+        target = self.output_dir / f"{safe_output_name(asset.asset_key)}.zip"
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             await asyncio.to_thread(
@@ -104,6 +105,7 @@ class PostProcessor:
             local_path=target,
             cached=asset.cached,
             history_keys=asset.history_keys or tuple(item.asset_key for item in assets),
+            r18=asset.r18,
         )
 
     @staticmethod

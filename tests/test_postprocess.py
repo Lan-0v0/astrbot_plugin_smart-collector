@@ -78,3 +78,27 @@ def test_multi_image_pdf_and_zip_include_every_page(tmp_path: Path) -> None:
         assert archive.history_keys == ("first", "second")
 
     asyncio.run(scenario())
+
+
+def test_postprocess_keeps_untrusted_asset_keys_inside_output_directory(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        image_path = tmp_path / "image.png"
+        Image.new("RGB", (16, 16), "red").save(image_path)
+        asset = CollectedAsset(
+            asset_key="../outside\\nested:asset",
+            source_key="source",
+            source_name="Source",
+            content_type=ContentType.IMAGE,
+            origin_url="https://example.com/image.png",
+            local_path=image_path,
+        )
+        output_dir = tmp_path / "output"
+        processor = PostProcessor(output_dir)
+        pdf = await processor.image_to_pdf(asset)
+        archive = await processor.compress(asset)
+        assert pdf.local_path
+        assert archive.local_path
+        assert pdf.local_path.resolve().is_relative_to(output_dir.resolve())
+        assert archive.local_path.resolve().is_relative_to(output_dir.resolve())
+
+    asyncio.run(scenario())

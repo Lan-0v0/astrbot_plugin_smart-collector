@@ -60,6 +60,8 @@ def test_schema_contains_required_default_api() -> None:
         for key in ("summary_provider", "summary_prompt", "cache_days"):
             assert key not in items
     pixiv_items = templates["pixiv"]["items"]
+    assert "/pixiv本地登陆" in templates["pixiv"]["hint"]
+    assert "/pixiv远程登陆" in templates["pixiv"]["hint"]
     assert list(pixiv_items) == [
         "name",
         "enabled",
@@ -86,7 +88,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.2.2"
+    assert metadata["version"] == "v0.3.0"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -151,6 +153,24 @@ def test_source_normalization_tolerates_invalid_legacy_values() -> None:
     )
     assert source.dedupe == -1
     assert source.rate_limit == -1.0
+
+
+def test_source_boolean_and_rate_values_are_normalized() -> None:
+    source = SourceConfig.from_mapping(
+        {
+            "url": "https://example.com",
+            "enabled": "false",
+            "image_to_pdf": "0",
+            "compress": "true",
+            "pixiv_r18_to_pdf": "yes",
+            "rate_limit": 99,
+        }
+    )
+    assert not source.enabled
+    assert not source.image_to_pdf
+    assert source.compress
+    assert source.pixiv_r18_to_pdf
+    assert source.rate_limit == 1.0
 
 
 def test_pixiv_source_normalization_without_url() -> None:

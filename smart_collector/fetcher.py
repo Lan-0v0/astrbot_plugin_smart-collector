@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import random
 import shutil
+import socket
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -37,6 +39,8 @@ CHALLENGE_MARKERS = (
     b"just a moment",
     b"checking your browser",
 )
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+MAX_REDIRECTS = 10
 
 
 class FetchError(RuntimeError):
@@ -65,7 +69,7 @@ class AntiBotFetcher:
         self._impersonated_session: Any | None = None
         self._impersonated_session_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(
-            follow_redirects=True,
+            follow_redirects=False,
             timeout=self.timeout,
             headers=DEFAULT_HEADERS,
             http2=True,
@@ -120,7 +124,7 @@ class AntiBotFetcher:
         return headers
 
     async def fetch(self, url: str, *, headers: dict[str, str] | None = None) -> FetchResponse:
-        self._validate_url(url)
+        await self._validate_network_url(url)
         if self._semaphore is None:
             return await self._fetch_with_retries(url, headers or {})
         async with self._semaphore:
@@ -130,7 +134,7 @@ class AntiBotFetcher:
         self, url: str, destination: Path, *, headers: dict[str, str] | None = None
     ) -> DownloadedFile:
         """Stream a media response to disk without the page-response memory limit."""
-        self._validate_url(url)
+        await self._validate_network_url(url)
         if self._semaphore is None:
             return await self._download_with_retries(url, destination, headers or {})
         async with self._semaphore:
@@ -140,46 +144,52 @@ class AntiBotFetcher:
         self, url: str, *, headers: dict[str, str] | None = None
     ) -> FetchResponse | None:
         """Perform a short HEAD request used only to rank media candidates."""
-        self._validate_url(url)
+        await self._validate_network_url(url)
 
         async def request() -> FetchResponse | None:
             timeout = 15.0 if self.timeout is None else min(15.0, max(0.1, self.timeout))
-            try:
-                response = await self._client.head(url, headers=headers or {}, timeout=timeout)
-            except httpx.HTTPError:
+            result = await self._httpx_probe_request("HEAD", url, headers or {}, timeout)
+            if result is None:
                 return None
-            result = FetchResponse(
-                url=str(response.url),
-                status=response.status_code,
-                content_type=response.headers.get("content-type", "").split(";", 1)[0].lower(),
-                body=b"",
-                headers=dict(response.headers),
-                transport="httpx-head",
-            )
             if result.status not in {405, 501} and result.content_type:
                 return result
             range_headers = {**(headers or {}), "Range": "bytes=0-0"}
-            try:
-                async with self._client.stream(
-                    "GET", url, headers=range_headers, timeout=timeout
-                ) as ranged:
-                    return FetchResponse(
-                        url=str(ranged.url),
-                        status=ranged.status_code,
-                        content_type=ranged.headers.get("content-type", "")
-                        .split(";", 1)[0]
-                        .lower(),
-                        body=b"",
-                        headers=dict(ranged.headers),
-                        transport="httpx-range-probe",
-                    )
-            except httpx.HTTPError:
-                return result
+            return await self._httpx_probe_request("GET", url, range_headers, timeout) or result
 
         if self._semaphore is None:
             return await request()
         async with self._semaphore:
             return await request()
+
+    async def _httpx_probe_request(
+        self, method: str, url: str, headers: dict[str, str], timeout: float
+    ) -> FetchResponse | None:
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            await self._validate_network_url(current)
+            try:
+                async with self._client.stream(
+                    method, current, headers=headers, timeout=timeout
+                ) as response:
+                    location = response.headers.get("location")
+                    if response.status_code in REDIRECT_STATUSES and location:
+                        current = self._validated_redirect(current, location)
+                        continue
+                    final_url = str(response.url)
+                    self._validate_url(final_url)
+                    return FetchResponse(
+                        url=final_url,
+                        status=response.status_code,
+                        content_type=response.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .lower(),
+                        body=b"",
+                        headers=dict(response.headers),
+                        transport="httpx-head" if method == "HEAD" else "httpx-range-probe",
+                    )
+            except httpx.HTTPError:
+                return None
+        raise FetchError(f"重定向次数超过 {MAX_REDIRECTS}: {url}")
 
     async def _fetch_with_retries(self, url: str, headers: dict[str, str]) -> FetchResponse:
         last_error: Exception | None = None
@@ -211,8 +221,21 @@ class AntiBotFetcher:
                 await asyncio.sleep(0.5 * (2**attempt) + random.random() * 0.25)
         raise FetchError(f"抓取失败 {url}: {last_error!r}") from last_error
 
-    async def _httpx_fetch(self, url: str, headers: dict[str, str]) -> FetchResponse:
+    async def _httpx_fetch(
+        self, url: str, headers: dict[str, str], _redirects: int = 0
+    ) -> FetchResponse:
+        await self._validate_network_url(url)
         async with self._client.stream("GET", url, headers=headers) as response:
+            if response.status_code in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if not location:
+                    self._validate_url(str(response.url))
+                elif _redirects >= MAX_REDIRECTS:
+                    raise FetchError(f"重定向次数超过 {MAX_REDIRECTS}: {url}")
+                else:
+                    target = self._validated_redirect(url, location)
+                    return await self._httpx_fetch(target, headers, _redirects + 1)
+            self._validate_url(str(response.url))
             body = bytearray()
             async for chunk in response.aiter_bytes():
                 body.extend(chunk)
@@ -263,12 +286,25 @@ class AntiBotFetcher:
         raise FetchError(f"下载失败 {url}: {last_error!r}") from last_error
 
     async def _httpx_download(
-        self, url: str, destination: Path, headers: dict[str, str]
+        self, url: str, destination: Path, headers: dict[str, str], _redirects: int = 0
     ) -> DownloadedFile:
+        await self._validate_network_url(url)
         digest = hashlib.sha256()
         size = 0
         try:
             async with self._client.stream("GET", url, headers=headers) as response:
+                if response.status_code in REDIRECT_STATUSES:
+                    location = response.headers.get("location")
+                    if not location:
+                        self._validate_url(str(response.url))
+                    elif _redirects >= MAX_REDIRECTS:
+                        raise FetchError(f"重定向次数超过 {MAX_REDIRECTS}: {url}")
+                    else:
+                        target = self._validated_redirect(url, location)
+                        return await self._httpx_download(
+                            target, destination, headers, _redirects + 1
+                        )
+                self._validate_url(str(response.url))
                 self._ensure_disk_capacity(destination, response.headers)
                 with destination.open("wb") as stream:
                     async for chunk in response.aiter_bytes():
@@ -291,15 +327,28 @@ class AntiBotFetcher:
             destination.unlink(missing_ok=True)
             raise
 
-    async def _impersonated_fetch(self, url: str, headers: dict[str, str]) -> FetchResponse | None:
+    async def _impersonated_fetch(
+        self, url: str, headers: dict[str, str], _redirects: int = 0
+    ) -> FetchResponse | None:
+        await self._validate_network_url(url)
         session = await self._get_impersonated_session()
         if session is None:
             return None
         response = None
         try:
             response = await session.get(
-                url, headers={**DEFAULT_HEADERS, **headers}, allow_redirects=True
+                url, headers={**DEFAULT_HEADERS, **headers}, allow_redirects=False
             )
+            if int(response.status_code) in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if location and _redirects < MAX_REDIRECTS:
+                    target = self._validated_redirect(url, str(location))
+                    await response.aclose()
+                    response = None
+                    return await self._impersonated_fetch(target, headers, _redirects + 1)
+                if location:
+                    raise FetchError(f"重定向次数超过 {MAX_REDIRECTS}: {url}")
+            self._validate_url(str(response.url))
             body = bytes(response.content)
             if len(body) > self.max_bytes:
                 raise FetchError(f"响应超过 {self.max_bytes} 字节上限")
@@ -319,8 +368,9 @@ class AntiBotFetcher:
                     await response.aclose()
 
     async def _impersonated_download(
-        self, url: str, destination: Path, headers: dict[str, str]
+        self, url: str, destination: Path, headers: dict[str, str], _redirects: int = 0
     ) -> DownloadedFile | None:
+        await self._validate_network_url(url)
         session = await self._get_impersonated_session()
         if session is None:
             return None
@@ -331,9 +381,21 @@ class AntiBotFetcher:
             response = await session.get(
                 url,
                 headers={**DEFAULT_HEADERS, **headers},
-                allow_redirects=True,
+                allow_redirects=False,
                 stream=True,
             )
+            if int(response.status_code) in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if location and _redirects < MAX_REDIRECTS:
+                    target = self._validated_redirect(url, str(location))
+                    await response.aclose()
+                    response = None
+                    return await self._impersonated_download(
+                        target, destination, headers, _redirects + 1
+                    )
+                if location:
+                    raise FetchError(f"重定向次数超过 {MAX_REDIRECTS}: {url}")
+            self._validate_url(str(response.url))
             self._ensure_disk_capacity(destination, response.headers)
             with destination.open("wb") as stream:
                 async for chunk in response.aiter_content():
@@ -361,14 +423,98 @@ class AntiBotFetcher:
             if response is not None:
                 await response.aclose()
 
-    @staticmethod
-    def _validate_url(url: str) -> None:
+    @classmethod
+    def _validate_url(cls, url: str) -> None:
         parts = urlsplit(url)
+        try:
+            _ = parts.hostname
+            _ = parts.port
+        except ValueError as exc:
+            raise FetchError("仅支持有效的 HTTP/HTTPS URL") from exc
         if parts.scheme not in {"http", "https"} or not parts.hostname:
             raise FetchError("仅支持有效的 HTTP/HTTPS URL")
         hostname = parts.hostname.lower().rstrip(".")
-        if hostname == "localhost" or hostname.endswith(".localhost"):
+        address = AntiBotFetcher._parse_ip_literal(hostname)
+        if address is not None and cls._is_blocked_address(address):
+            raise FetchError("不允许抓取本机或内网地址")
+        if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
             raise FetchError("不允许抓取本机地址")
+
+    @classmethod
+    async def _validate_network_url(cls, url: str) -> None:
+        """Validate the URL syntax and reject hostnames resolving to local IPs."""
+        cls._validate_url(url)
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        if not hostname or cls._parse_ip_literal(hostname) is not None:
+            return
+
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            addresses = await asyncio.to_thread(
+                socket.getaddrinfo,
+                hostname,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except socket.gaierror:
+            return
+        except OSError as exc:
+            raise FetchError("无法解析目标地址") from exc
+
+        for address_info in addresses:
+            socket_address = address_info[4]
+            try:
+                address = ipaddress.ip_address(socket_address[0])
+            except (IndexError, ValueError, TypeError) as exc:
+                raise FetchError("无法解析目标地址") from exc
+            if cls._is_blocked_address(address):
+                raise FetchError("不允许抓取本机或内网地址")
+
+    @staticmethod
+    def _is_blocked_address(
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    ) -> bool:
+        return any(
+            (
+                address.is_private,
+                address.is_loopback,
+                address.is_link_local,
+                address.is_multicast,
+                address.is_reserved,
+                address.is_unspecified,
+            )
+        )
+
+    @classmethod
+    def _validated_redirect(cls, current_url: str, location: str) -> str:
+        target = urljoin(current_url, location.strip())
+        cls._validate_url(target)
+        return target
+
+    @staticmethod
+    def _parse_ip_literal(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+        try:
+            return ipaddress.ip_address(hostname)
+        except ValueError:
+            pass
+        try:
+            if hostname.lower().startswith("0x"):
+                value = int(hostname, 16)
+                if 0 <= value <= 0xFFFFFFFF:
+                    return ipaddress.IPv4Address(value)
+            if hostname.isdigit() and len(hostname) <= 10:
+                value = int(hostname, 10)
+                if 0 <= value <= 0xFFFFFFFF:
+                    return ipaddress.IPv4Address(value)
+            parts = hostname.split(".")
+            if len(parts) == 4 and all(part.isdigit() for part in parts):
+                octets = [int(part, 10) for part in parts]
+                if all(0 <= part <= 255 for part in octets):
+                    return ipaddress.IPv4Address(".".join(str(part) for part in octets))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return None
 
     @staticmethod
     def _is_challenge(response: FetchResponse) -> bool:

@@ -8,7 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .models import CollectedAsset, ContentType
+from .models import CollectedAsset, ContentType, safe_output_name
 
 
 class CacheStore:
@@ -408,6 +408,8 @@ class CacheStore:
         assert self._conn is not None
         removed = 0
         now = time.time()
+        output_root = (self.data_dir / "output").resolve()
+        files_root = self.files_dir.resolve()
         for source_key, days in source_days.items():
             if days < 0:
                 continue
@@ -417,7 +419,16 @@ class CacheStore:
                 (source_key, cutoff),
             ).fetchall()
             for row in rows:
-                for derived in (self.data_dir / "output").glob(f"{row['asset_key']}*"):
+                asset_key = str(row["asset_key"])
+                derived_name = safe_output_name(asset_key)
+                expected_derived_names = {derived_name, f"{derived_name}.zip"}
+                for derived in output_root.iterdir() if output_root.exists() else ():
+                    if derived.name not in expected_derived_names:
+                        continue
+                    try:
+                        derived.resolve().relative_to(output_root)
+                    except ValueError:
+                        continue
                     with suppress(OSError):
                         if derived.is_dir():
                             import shutil
@@ -425,12 +436,6 @@ class CacheStore:
                             shutil.rmtree(derived, ignore_errors=True)
                         else:
                             derived.unlink(missing_ok=True)
-                derived_dir = self.data_dir / "output" / str(row["asset_key"]).replace(":", "_")
-                if derived_dir.exists():
-                    with suppress(OSError):
-                        import shutil
-
-                        shutil.rmtree(derived_dir, ignore_errors=True)
                 self._conn.execute("DELETE FROM assets WHERE asset_key = ?", (row["asset_key"],))
                 if row["local_path"]:
                     still_referenced = self._conn.execute(
@@ -440,9 +445,14 @@ class CacheStore:
                     if not still_referenced:
                         with suppress(OSError):
                             local_path = Path(row["local_path"])
-                            local_path.unlink(missing_ok=True)
-                            if local_path.parent != self.data_dir:
-                                local_path.parent.rmdir()
+                            try:
+                                local_path.resolve().relative_to(files_root)
+                            except ValueError:
+                                pass
+                            else:
+                                local_path.unlink(missing_ok=True)
+                                if local_path.parent not in {self.data_dir, files_root}:
+                                    local_path.parent.rmdir()
                 removed += 1
         self._conn.commit()
         return removed

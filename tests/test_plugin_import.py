@@ -158,27 +158,117 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
 
     class LocalAuth:
         called = False
+        callback = ""
 
         async def login_local(self):
             self.called = True
+
+        async def start(self):
+            return "https://example.com/pixiv-login"
+
+        async def finish(self, callback):
+            self.callback = callback
 
     local_auth = LocalAuth()
     plugin.pipeline = types.SimpleNamespace(pixiv=types.SimpleNamespace(auth=local_auth))
 
     class LocalLoginEvent:
-        message_str = "/pixiv登陆 本地"
+        message_str = "/pixiv本地登陆"
 
         @staticmethod
         def plain_result(value):
             return value
 
     async def local_login_scenario() -> None:
-        results = [item async for item in plugin.pixiv_login_command(LocalLoginEvent())]
+        results = [item async for item in plugin.pixiv_local_login_command(LocalLoginEvent())]
         assert local_auth.called
         assert results[0].startswith("已打开本地 Pixiv 登录窗口")
         assert results[1] == "Pixiv 登录成功，Refresh Token 已保存。"
 
     asyncio.run(local_login_scenario())
+
+    class RemoteLoginEvent:
+        message_str = "/pixiv远程登陆"
+
+        @staticmethod
+        def plain_result(value):
+            return value
+
+        @staticmethod
+        def chain_result(value):
+            return value
+
+    class RemoteCallbackEvent(RemoteLoginEvent):
+        message_str = "/pixiv远程登陆 pixiv://account/login?code=test"
+
+    async def remote_login_scenario() -> None:
+        results = [item async for item in plugin.pixiv_remote_login_command(RemoteLoginEvent())]
+        assert not isinstance(results[0], str), results
+        assert type(results[0][0]).__name__ == "Image"
+        assert "登录链接：https://example.com/pixiv-login" in results[0][1].args[0]
+        callback_results = [
+            item async for item in plugin.pixiv_remote_login_command(RemoteCallbackEvent())
+        ]
+        assert local_auth.callback == "pixiv://account/login?code=test"
+        assert callback_results == ["Pixiv 登录成功，Refresh Token 已保存。"]
+
+    asyncio.run(remote_login_scenario())
+
+    builtin = plugin._default_pixiv_source()
+    assert builtin.key == "pixiv:__builtin__"
+    assert builtin.command == "/pixiv"
+    assert builtin.pixiv_age_mode == "all"
+    assert builtin.pixiv_r18_to_pdf
+    assert builtin.dedupe == 0
+    assert not builtin.compress
+    assert builtin.forward_mode == "none"
+    assert builtin.rate_limit == 1.0
+    assert builtin.schedules == ()
+
+    configured_pixiv = module.SourceConfig.from_mapping(
+        {
+            "__template_key": "pixiv",
+            "name": "自定义",
+            "command": "/p",
+            "age_mode": "safe",
+            "dedupe": -1,
+            "image_to_pdf": True,
+            "compress": True,
+            "forward_mode": "user",
+            "rate_limit": -1,
+        }
+    )
+    plugin.sources = [configured_pixiv]
+    assert plugin._default_pixiv_source() == builtin
+    assert "Pixiv（P站）图像采集专属帮助" in module.PIXIV_HELP
+    assert "/pixiv本地登陆" in module.PIXIV_HELP
+    assert "/pixiv远程登陆 [URL]" in module.PIXIV_HELP
+
+    captured_sources = []
+
+    async def capture_pixiv_sources(self, event, sources, query, explicit_types=None):
+        captured_sources.extend(sources)
+        yield query
+
+    class PixivCommandEvent:
+        message_str = "/pixiv 百合 jk r18"
+
+    async def builtin_pixiv_command_scenario() -> None:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                module.SmartCollectorPlugin,
+                "_collect_and_reply",
+                capture_pixiv_sources,
+            )
+            results = [item async for item in plugin.pixiv_command(PixivCommandEvent())]
+        assert results == ["百合 jk r18"]
+
+    asyncio.run(builtin_pixiv_command_scenario())
+    assert captured_sources == [builtin]
+    conflicting_pixiv = module.SourceConfig.from_mapping(
+        {"__template_key": "pixiv", "name": "冲突 Pixiv", "command": "/pixiv"}
+    )
+    assert module._match_custom_source("/pixiv 百合", [conflicting_pixiv]) == (None, "")
 
     class ReplyPipeline:
         def __init__(self):

@@ -57,8 +57,9 @@ AstrBot 会根据 `requirements.txt` 安装依赖。插件要求 AstrBot `>=4.10
 /插画
 /pixiv
 /pixiv 百合 JK 白丝
-/pixiv登陆
-/pixiv登陆 本地
+/pixiv 百合 JK r18
+/pixiv本地登陆
+/pixiv远程登陆
 /爬取 https://example.com/path
 /爬取 https://example.com/path 图片
 /爬取 https://example.com/path 图片 蓝色夜景 横屏
@@ -70,10 +71,13 @@ URL 时只返回指令规范提示，不会抓取已配置条目。图片描述�
 足够的文字元数据，插件会继续使用正文位置、原图来源和图片质量进行回退。成功响应只发送抓取到的媒体或文字，不附加
 数据源名称、缓存状态和来源地址。
 
-Pixiv 条目首次使用时发送 `/pixiv登陆`，扫描二维码并在浏览器完成登录后，把回调地址作为
-`/pixiv登陆 [URL]` 发送。登录凭据只保存为插件数据目录中的 Refresh Token；随后可用
-`/pixiv [Tag1] [Tag2]` 或条目专属指令（例如 `/p 百合 JK 白丝`）搜索同时符合多个 Tag 的图片。
-本地桌面部署可发送 `/pixiv登陆 本地`，插件会启动隔离的 Chrome/Edge 窗口，通过本机
+Pixiv 条目首次使用时可发送 `/pixiv远程登陆`，扫描二维码或打开链接完成登录后，把回调地址作为
+`/pixiv远程登陆 [URL]` 发送。登录凭据只保存为插件数据目录中的 Refresh Token；随后可用
+`/pixiv [Tag1] [Tag2] ... r18` 或条目专属指令（例如 `/p 百合 JK 白丝`）搜索同时符合多个 Tag 的图片。
+默认 `/pixiv` 使用独立内置配置，不受自定义条目覆盖；不加 `r18` 时包含全年龄与 R18，实际选中
+全年龄作品时发送原图，选中 R18 作品时转为 PDF。内置配置永久去重、不压缩、不伪造转发、不定时
+发送，并按同一用户 1 秒限速。
+本地桌面部署可发送 `/pixiv本地登陆`，插件会启动隔离的 Chrome/Edge 窗口，通过本机
 DevTools 协议自动截获授权 code 并完成登录；二维码与手动 code 流程仍作为远程部署回退。
 
 启用“自然语言爬取”后，AstrBot 的 LLM 可调用 `smart_collect`，参数包括需求文字、可选数据源
@@ -122,7 +126,7 @@ python scripts/live_smoke.py --pektino-only --video-quality highest
 
 ## 版本
 
-当前版本：`v0.2.2`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.3.0`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

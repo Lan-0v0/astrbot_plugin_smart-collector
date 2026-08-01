@@ -305,6 +305,55 @@ def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Pat
     asyncio.run(scenario())
 
 
+def test_builtin_pixiv_converts_only_r18_results_to_pdf(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "pixiv.png"
+    Image.new("RGB", (64, 64), "red").save(image_path)
+
+    class FakePixiv:
+        async def candidates(self, source, query):
+            return []
+
+    async def fake_collect_pixiv_work(self, source, candidates, query):
+        return CollectedAsset(
+            asset_key=f"asset-{query}",
+            source_key=source.key,
+            source_name=source.name,
+            content_type=ContentType.IMAGE,
+            origin_url="https://i.pximg.test/image.png",
+            mime_type="image/png",
+            local_path=image_path,
+            r18="r18" in query.casefold(),
+        )
+
+    monkeypatch.setattr(CollectorPipeline, "_collect_pixiv_work", fake_collect_pixiv_work)
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        pipeline.pixiv = FakePixiv()  # type: ignore[assignment]
+        source = SourceConfig(
+            key="pixiv:__builtin__",
+            template="pixiv",
+            name="Pixiv 默认指令",
+            enabled=True,
+            url="https://app-api.pixiv.net/",
+            content_types=(ContentType.IMAGE,),
+            command="/pixiv",
+            dedupe=0,
+            forward_mode="none",
+            rate_limit=-1,
+            pixiv_age_mode="all",
+            pixiv_r18_to_pdf=True,
+        )
+        safe = await pipeline.collect(source, (ContentType.IMAGE,), "safe-user", "百合")
+        assert safe.mime_type == "image/png"
+        r18 = await pipeline.collect(source, (ContentType.IMAGE,), "r18-user", "百合 r18")
+        assert r18.mime_type == "application/pdf"
+        assert r18.local_path and r18.local_path.stat().st_size > 0
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_cached_candidate_skips_probe_and_download(tmp_path: Path) -> None:
     class NoNetworkFetcher:
         def __init__(self) -> None:

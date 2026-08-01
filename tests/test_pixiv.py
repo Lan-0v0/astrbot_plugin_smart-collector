@@ -97,6 +97,7 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
         ]
         assert all(item.content_type is ContentType.IMAGE for item in candidates)
         assert all(item.referer == "https://www.pixiv.net/" for item in candidates)
+        assert all(item.r18 for item in candidates)
         assert len({item.group_key for item in candidates}) == 1
         assert [item.page_index for item in candidates] == [0, 1]
 
@@ -156,7 +157,7 @@ def test_pixiv_oauth_qr_and_callback_persist_token(monkeypatch, tmp_path: Path) 
 
 def test_pixiv_oauth_rejects_callback_without_pending_login(tmp_path: Path) -> None:
     async def scenario() -> None:
-        with pytest.raises(PixivError, match="二维码已过期"):
+        with pytest.raises(PixivError, match="授权已过期"):
             await PixivAuthManager(tmp_path).finish("pixiv://account/login?code=value")
 
     asyncio.run(scenario())
