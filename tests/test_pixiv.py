@@ -48,6 +48,10 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
                         "meta_single_page": {
                             "original_image_url": "https://i.pximg.net/img-original/safe.jpg"
                         },
+                        "image_urls": {
+                            "large": "https://i.pximg.net/img-master/safe.jpg",
+                            "medium": "https://i.pximg.net/img-master/safe-medium.jpg",
+                        },
                         "meta_pages": [],
                         "tags": [{"name": "百合"}],
                     },
@@ -100,6 +104,21 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
         assert all(item.r18 for item in candidates)
         assert len({item.group_key for item in candidates}) == 1
         assert [item.page_index for item in candidates] == [0, 1]
+
+        all_source = SourceConfig.from_mapping(
+            {
+                "__template_key": "pixiv",
+                "name": "P站全部年龄段",
+                "refresh_token": "test-token",
+                "age_mode": "all",
+            }
+        )
+        all_candidates = await collector.candidates(all_source, "百合 JK")
+        safe_candidate = next(item for item in all_candidates if not item.r18)
+        assert safe_candidate.alternate_urls == (
+            "https://i.pximg.net/img-master/safe.jpg",
+            "https://i.pximg.net/img-master/safe-medium.jpg",
+        )
 
     asyncio.run(scenario())
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from smart_collector.fetcher import FetchError
 from smart_collector.models import (
     Candidate,
     CollectedAsset,
@@ -300,6 +301,69 @@ def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Pat
         await pipeline.mark_sent(source, second)
         assert await pipeline._collect_pixiv_work(source, candidates, "百合") is None
         assert sorted(fetcher.downloads) == sorted(item.url for item in candidates)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: Path) -> None:
+    class FallbackPixivImageFetcher:
+        def __init__(self) -> None:
+            self.downloads: list[str] = []
+
+        async def download(self, url, destination, *, headers=None):
+            self.downloads.append(url)
+            if "/img-original/" in url:
+                raise FetchError("模拟原图下载失败")
+            output = io.BytesIO()
+            Image.new("RGB", (1200, 1800), "red").save(output, "JPEG")
+            body = output.getvalue()
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "image/jpeg",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fetcher = FallbackPixivImageFetcher()
+        pipeline.fetcher = fetcher  # type: ignore[assignment]
+        source = SourceConfig.from_mapping(
+            {
+                "__template_key": "pixiv",
+                "name": "Pixiv 默认指令",
+                "dedupe": 0,
+                "rate_limit": -1,
+            }
+        )
+        candidate = Candidate(
+            ContentType.IMAGE,
+            url="https://i.pximg.net/img-original/image.jpg",
+            alternate_urls=("https://i.pximg.net/img-master/image.jpg",),
+            referer="https://www.pixiv.net/",
+            width=1200,
+            height=1800,
+            group_key="pixiv:work-fallback",
+        )
+
+        asset = await pipeline._collect_pixiv_work(source, [candidate], "白丝 jk")
+        assert asset and asset.exists
+        assert asset.origin_url == candidate.url
+        assert fetcher.downloads == [
+            "https://i.pximg.net/img-original/image.jpg",
+            "https://i.pximg.net/img-master/image.jpg",
+        ]
+        await pipeline.mark_sent(source, asset)
         await pipeline.close()
 
     asyncio.run(scenario())

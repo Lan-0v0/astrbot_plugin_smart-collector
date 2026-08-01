@@ -251,7 +251,7 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
         yield query
 
     class PixivCommandEvent:
-        message_str = "/pixiv 百合 jk r18"
+        message_str = "/pixiv 白丝 jk"
 
     async def builtin_pixiv_command_scenario() -> None:
         with monkeypatch.context() as scoped:
@@ -261,7 +261,7 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
                 capture_pixiv_sources,
             )
             results = [item async for item in plugin.pixiv_command(PixivCommandEvent())]
-        assert results == ["百合 jk r18"]
+        assert results == ["白丝 jk"]
 
     asyncio.run(builtin_pixiv_command_scenario())
     assert captured_sources == [builtin]

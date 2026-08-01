@@ -249,6 +249,7 @@ class Candidate:
     group_key: str = ""
     page_index: int = 0
     r18: bool = False
+    alternate_urls: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

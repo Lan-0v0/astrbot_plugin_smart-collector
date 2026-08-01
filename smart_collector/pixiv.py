@@ -49,30 +49,52 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
-def _pixiv_image_urls(illust: Any) -> list[tuple[str, int, int]]:
-    urls: list[tuple[str, int, int]] = []
-    single = _value(illust, "meta_single_page", {}) or {}
-    original = _value(single, "original_image_url", "")
-    if original:
-        urls.append(
-            (
-                str(original),
-                int(_value(illust, "width", 0) or 0),
-                int(_value(illust, "height", 0) or 0),
+def _pixiv_image_urls(illust: Any) -> list[tuple[str, int, int, tuple[str, ...]]]:
+    urls: list[tuple[str, int, int, tuple[str, ...]]] = []
+    seen_urls: set[str] = set()
+
+    def append_urls(
+        primary_url: Any,
+        alternate_urls: tuple[Any, ...],
+        width: int,
+        height: int,
+    ) -> None:
+        ordered_urls = tuple(
+            dict.fromkeys(
+                str(url).strip() for url in (primary_url, *alternate_urls) if str(url or "").strip()
             )
         )
+        if not ordered_urls or ordered_urls[0] in seen_urls:
+            return
+        seen_urls.add(ordered_urls[0])
+        urls.append((ordered_urls[0], width, height, ordered_urls[1:]))
+
+    width = int(_value(illust, "width", 0) or 0)
+    height = int(_value(illust, "height", 0) or 0)
+    single = _value(illust, "meta_single_page", {}) or {}
+    original = _value(single, "original_image_url", "")
+    top_level_image_urls = _value(illust, "image_urls", {}) or {}
+    append_urls(
+        original or _value(top_level_image_urls, "large", ""),
+        (
+            _value(top_level_image_urls, "large", ""),
+            _value(top_level_image_urls, "medium", ""),
+        ),
+        width,
+        height,
+    )
     for page in _value(illust, "meta_pages", []) or []:
         image_urls = _value(page, "image_urls", {}) or {}
-        page_url = _value(image_urls, "original", "") or _value(image_urls, "large", "")
-        if page_url:
-            urls.append(
-                (
-                    str(page_url),
-                    int(_value(illust, "width", 0) or 0),
-                    int(_value(illust, "height", 0) or 0),
-                )
-            )
-    return list(dict.fromkeys(urls))
+        append_urls(
+            _value(image_urls, "original", "") or _value(image_urls, "large", ""),
+            (
+                _value(image_urls, "large", ""),
+                _value(image_urls, "medium", ""),
+            ),
+            width,
+            height,
+        )
+    return urls
 
 
 def _oauth_callback_params(value: str) -> dict[str, list[str]]:
@@ -450,7 +472,7 @@ class PixivCollector:
             if not illust_id and image_urls:
                 illust_id = hashlib.sha1(image_urls[0][0].encode()).hexdigest()[:20]
             group_key = f"pixiv:{illust_id}"
-            for page_index, (url, width, height) in enumerate(image_urls):
+            for page_index, (url, width, height, alternate_urls) in enumerate(image_urls):
                 if url in seen:
                     continue
                 seen.add(url)
@@ -458,6 +480,7 @@ class PixivCollector:
                     Candidate(
                         ContentType.IMAGE,
                         url=url,
+                        alternate_urls=alternate_urls,
                         title=title,
                         referer="https://www.pixiv.net/",
                         width=width,

@@ -126,7 +126,7 @@ python scripts/live_smoke.py --pektino-only --video-quality highest
 
 ## 版本
 
-当前版本：`v0.3.0`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.3.1`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

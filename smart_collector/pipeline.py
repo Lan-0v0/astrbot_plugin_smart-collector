@@ -8,6 +8,7 @@ import random
 import re
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -820,19 +821,18 @@ class CollectorPipeline:
             if not target.exists():
                 await asyncio.to_thread(target.write_bytes, body)
         else:
-            headers = self._candidate_headers(source, candidate)
             temporary = self.cache.files_dir / f".download-{uuid.uuid4().hex}"
 
-            async def validate_download(downloaded) -> str:
+            async def validate_download(downloaded, download_candidate: Candidate) -> str:
                 if downloaded.status >= 400:
                     raise FetchError(f"资源返回 HTTP {downloaded.status}")
-                current_mime = downloaded.content_type or candidate.mime_type
+                current_mime = downloaded.content_type or download_candidate.mime_type
                 actual_type = self.extractor._mime_type(current_mime)
-                if actual_type and actual_type is not candidate.content_type:
+                if actual_type and actual_type is not download_candidate.content_type:
                     raise FetchError("资源响应类型与解析类型不一致")
                 if "html" in current_mime or "json" in current_mime:
                     raise FetchError("候选资源不是可下载媒体")
-                if candidate.content_type is ContentType.IMAGE:
+                if download_candidate.content_type is ContentType.IMAGE:
                     actual_size = downloaded.local_path.stat().st_size
                     if self.image_min_bytes >= 0 and actual_size < self.image_min_bytes:
                         raise FetchError(f"候选图片小于 {self.image_min_bytes // 1024} KB 忽略阈值")
@@ -844,30 +844,48 @@ class CollectorPipeline:
                         raise FetchError("候选图片文件无效") from exc
                     if width <= 8 or height <= 8 or width * height <= 256:
                         raise FetchError("候选图片是极小占位图")
-                    candidate.width = width
-                    candidate.height = height
+                    download_candidate.width = width
+                    download_candidate.height = height
                 return current_mime
 
             try:
-                try:
-                    downloaded = await self.fetcher.download(
-                        candidate.url, temporary, headers=headers
-                    )
-                    mime_type = await validate_download(downloaded)
-                except FetchError:
-                    if (
-                        not candidate.referer
-                        or urlsplit(candidate.url).hostname == urlsplit(source.url).hostname
-                    ):
-                        raise
-                    downloaded = await self.fetcher.download(
-                        candidate.url,
-                        temporary,
-                        headers=self._candidate_headers(
-                            source, candidate, include_cross_origin_referer=True
-                        ),
-                    )
-                    mime_type = await validate_download(downloaded)
+                download_urls = tuple(dict.fromkeys((candidate.url, *candidate.alternate_urls)))
+                last_error: Exception | None = None
+                for download_url in download_urls:
+                    download_candidate = replace(candidate, url=download_url)
+                    try:
+                        downloaded = await self.fetcher.download(
+                            download_url,
+                            temporary,
+                            headers=self._candidate_headers(source, download_candidate),
+                        )
+                        try:
+                            mime_type = await validate_download(downloaded, download_candidate)
+                        except FetchError:
+                            if (
+                                not download_candidate.referer
+                                or urlsplit(download_url).hostname == urlsplit(source.url).hostname
+                            ):
+                                raise
+                            downloaded = await self.fetcher.download(
+                                download_url,
+                                temporary,
+                                headers=self._candidate_headers(
+                                    source,
+                                    download_candidate,
+                                    include_cross_origin_referer=True,
+                                ),
+                            )
+                            mime_type = await validate_download(downloaded, download_candidate)
+                        candidate.width = download_candidate.width
+                        candidate.height = download_candidate.height
+                        break
+                    except (CollectionError, FetchError, OSError) as exc:
+                        last_error = exc
+                else:
+                    if last_error is not None:
+                        raise last_error
+                    raise FetchError("候选资源没有可用下载地址")
                 origin_url = candidate.url
                 content_digest = downloaded.sha256
                 target = self.cache.files_dir / (
