@@ -49,19 +49,24 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
-def _pixiv_image_urls(illust: Any) -> list[tuple[str, int, int, tuple[str, ...]]]:
+def _pixiv_image_urls(
+    illust: Any, quality: str = "auto"
+) -> list[tuple[str, int, int, tuple[str, ...]]]:
     urls: list[tuple[str, int, int, tuple[str, ...]]] = []
     seen_urls: set[str] = set()
 
-    def append_urls(
-        primary_url: Any,
-        alternate_urls: tuple[Any, ...],
-        width: int,
-        height: int,
-    ) -> None:
+    def append_image_urls(image_urls: Any, original_url: Any, width: int, height: int) -> None:
+        available_urls = {
+            "original": str(original_url or "").strip(),
+            "large": str(_value(image_urls, "large", "") or "").strip(),
+            "medium": str(_value(image_urls, "medium", "") or "").strip(),
+        }
+        quality_order = ("original", "large", "medium") if quality == "auto" else (quality,)
         ordered_urls = tuple(
             dict.fromkeys(
-                str(url).strip() for url in (primary_url, *alternate_urls) if str(url or "").strip()
+                available_urls[quality_name]
+                for quality_name in quality_order
+                if available_urls.get(quality_name)
             )
         )
         if not ordered_urls or ordered_urls[0] in seen_urls:
@@ -71,26 +76,20 @@ def _pixiv_image_urls(illust: Any) -> list[tuple[str, int, int, tuple[str, ...]]
 
     width = int(_value(illust, "width", 0) or 0)
     height = int(_value(illust, "height", 0) or 0)
-    single = _value(illust, "meta_single_page", {}) or {}
-    original = _value(single, "original_image_url", "")
-    top_level_image_urls = _value(illust, "image_urls", {}) or {}
-    append_urls(
-        original or _value(top_level_image_urls, "large", ""),
-        (
-            _value(top_level_image_urls, "large", ""),
-            _value(top_level_image_urls, "medium", ""),
-        ),
-        width,
-        height,
-    )
-    for page in _value(illust, "meta_pages", []) or []:
+    pages = _value(illust, "meta_pages", []) or []
+    for page in pages:
         image_urls = _value(page, "image_urls", {}) or {}
-        append_urls(
-            _value(image_urls, "original", "") or _value(image_urls, "large", ""),
-            (
-                _value(image_urls, "large", ""),
-                _value(image_urls, "medium", ""),
-            ),
+        append_image_urls(
+            image_urls,
+            _value(image_urls, "original", ""),
+            width,
+            height,
+        )
+    if not pages:
+        single = _value(illust, "meta_single_page", {}) or {}
+        append_image_urls(
+            _value(illust, "image_urls", {}) or {},
+            _value(single, "original_image_url", ""),
             width,
             height,
         )
@@ -467,7 +466,7 @@ class PixivCollector:
             tags = " ".join(
                 str(_value(tag, "name", "") or "") for tag in (_value(illust, "tags", []) or [])
             )
-            image_urls = _pixiv_image_urls(illust)
+            image_urls = _pixiv_image_urls(illust, source.pixiv_quality)
             illust_id = str(_value(illust, "id", "") or "").strip()
             if not illust_id and image_urls:
                 illust_id = hashlib.sha1(image_urls[0][0].encode()).hexdigest()[:20]
@@ -493,7 +492,14 @@ class PixivCollector:
                     )
                 )
         if not candidates:
-            raise PixivError("Pixiv 没有找到符合年龄段的图片")
+            quality_labels = {
+                "auto": "Auto",
+                "original": "原图",
+                "large": "大图",
+                "medium": "中图",
+            }
+            quality_label = quality_labels[source.pixiv_quality]
+            raise PixivError(f"Pixiv 没有找到符合年龄段且提供{quality_label}画质的图片")
         return candidates
 
     async def _client(self, token: str) -> Any:

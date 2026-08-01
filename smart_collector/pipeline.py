@@ -141,7 +141,7 @@ class CollectorPipeline:
                 candidates = await self.pixiv.candidates(source, query)
                 asset = await self._collect_pixiv_work(source, candidates, query)
                 if asset is None:
-                    raise PixivError("Pixiv 作品均已去重或无法完整下载")
+                    raise PixivError("Pixiv 搜索结果均已发送过，请更换 Tag 后重试")
             except PixivError as exc:
                 raise CollectionError(str(exc)) from exc
             if (
@@ -254,6 +254,8 @@ class CollectorPipeline:
         group_keys = list(groups)
         self._rng.shuffle(group_keys)
         source_response = FetchResponse(source.url, 200, "application/json", b"")
+        download_errors: list[str] = []
+        rejected_for_non_dedupe_reason = False
 
         async def materialize_page(
             page: Candidate, cached_asset: CollectedAsset | None
@@ -264,6 +266,8 @@ class CollectorPipeline:
 
         for group_key in group_keys[:100]:
             pages = sorted(groups[group_key], key=lambda item: item.page_index)
+            if not await self.cache.is_allowed(source.key, group_key, source.dedupe):
+                continue
             cached = await asyncio.gather(
                 *(self.cache.get_asset_by_origin(source.key, page.url) for page in pages)
             )
@@ -281,6 +285,10 @@ class CollectorPipeline:
                 return_exceptions=True,
             )
             if any(isinstance(result, BaseException) for result in results):
+                rejected_for_non_dedupe_reason = True
+                download_errors.extend(
+                    str(result) for result in results if isinstance(result, BaseException)
+                )
                 continue
             assets = [result for result in results if isinstance(result, CollectedAsset)]
             if len(assets) != len(pages):
@@ -300,29 +308,37 @@ class CollectorPipeline:
                 )
             )
             if not all(matches):
+                rejected_for_non_dedupe_reason = True
                 continue
             asset_keys = tuple(asset.asset_key for asset in assets)
+            selection_keys = (group_key, *asset_keys)
             if source.dedupe >= 0:
                 async with self._pixiv_selection_lock:
                     reserved = self._pixiv_reserved.setdefault(source.key, set())
-                    if reserved.intersection(asset_keys):
+                    if reserved.intersection(selection_keys):
                         continue
                     still_allowed = await asyncio.gather(
                         *(
                             self.cache.is_allowed(source.key, asset_key, source.dedupe)
-                            for asset_key in asset_keys
+                            for asset_key in selection_keys
                         )
                     )
                     if not all(still_allowed):
                         continue
-                    reserved.update(asset_keys)
+                    reserved.update(selection_keys)
             primary = assets[0]
             for page_asset, page in zip(assets, pages, strict=True):
                 page_asset.r18 = page.r18
             primary.attachments = assets[1:]
-            primary.history_keys = asset_keys
+            primary.history_keys = selection_keys
             primary.r18 = any(page.r18 for page in pages)
             return primary
+        if download_errors:
+            unique_errors = list(dict.fromkeys(download_errors))
+            details = "；".join(unique_errors[-3:])
+            raise PixivError(f"Pixiv 图片下载失败：{details}")
+        if rejected_for_non_dedupe_reason:
+            raise PixivError("Pixiv 图片下载完成但未通过文件或尺寸校验")
         return None
 
     async def cleanup(self, sources: list[SourceConfig], cache_days: int = 7) -> int:

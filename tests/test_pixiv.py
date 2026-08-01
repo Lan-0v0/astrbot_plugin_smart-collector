@@ -12,6 +12,7 @@ from smart_collector.pixiv import (
     PixivCollector,
     PixivError,
     _callback_from_cdp_payload,
+    _pixiv_image_urls,
     parse_pixiv_query,
 )
 
@@ -22,6 +23,31 @@ def test_parse_multiple_tags_and_natural_language_age() -> None:
     assert parse_pixiv_query("全年龄 风景", "r18") == ("风景", "safe")
     with pytest.raises(PixivError, match="至少一个 Tag"):
         parse_pixiv_query("R18")
+
+
+def test_pixiv_image_quality_modes_select_expected_urls() -> None:
+    illustration = {
+        "width": 1200,
+        "height": 1800,
+        "meta_single_page": {"original_image_url": "https://i.pximg.net/original.jpg"},
+        "image_urls": {
+            "large": "https://i.pximg.net/large.jpg",
+            "medium": "https://i.pximg.net/medium.jpg",
+        },
+        "meta_pages": [],
+    }
+    assert _pixiv_image_urls(illustration, "auto") == [
+        (
+            "https://i.pximg.net/original.jpg",
+            1200,
+            1800,
+            ("https://i.pximg.net/large.jpg", "https://i.pximg.net/medium.jpg"),
+        )
+    ]
+    for quality in ("original", "large", "medium"):
+        assert _pixiv_image_urls(illustration, quality) == [
+            (f"https://i.pximg.net/{quality}.jpg", 1200, 1800, ())
+        ]
 
 
 def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path) -> None:

@@ -127,6 +127,7 @@ class SourceConfig:
     target_qq_groups: tuple[str, ...] = ()
     pixiv_refresh_token: str = ""
     pixiv_age_mode: str = "all"
+    pixiv_quality: str = "auto"
     pixiv_r18_to_pdf: bool = False
 
     @classmethod
@@ -170,6 +171,9 @@ class SourceConfig:
         pixiv_age_mode = str(value.get("age_mode") or "all").strip().lower()
         if pixiv_age_mode not in {"all", "safe", "r18"}:
             pixiv_age_mode = "all"
+        pixiv_quality = str(value.get("quality") or "auto").strip().lower()
+        if pixiv_quality not in {"auto", "original", "large", "medium"}:
+            pixiv_quality = "auto"
         url = str(value.get("url") or "").strip()
         if template == "pixiv":
             url = url or "https://app-api.pixiv.net/"
@@ -204,6 +208,7 @@ class SourceConfig:
             ),
             pixiv_refresh_token=pixiv_refresh_token,
             pixiv_age_mode=pixiv_age_mode,
+            pixiv_quality=pixiv_quality,
             pixiv_r18_to_pdf=normalize_bool(value.get("pixiv_r18_to_pdf", False)),
         )
 

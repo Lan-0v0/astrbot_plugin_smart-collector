@@ -218,6 +218,7 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert builtin.key == "pixiv:__builtin__"
     assert builtin.command == "/pixiv"
     assert builtin.pixiv_age_mode == "all"
+    assert builtin.pixiv_quality == "auto"
     assert builtin.pixiv_r18_to_pdf
     assert builtin.dedupe == 0
     assert not builtin.compress

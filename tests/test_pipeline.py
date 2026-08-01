@@ -18,6 +18,7 @@ from smart_collector.models import (
     SourceConfig,
 )
 from smart_collector.pipeline import CollectorPipeline
+from smart_collector.pixiv import PixivError
 
 
 class FakeFetcher:
@@ -291,7 +292,8 @@ def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Pat
         assert first and len(first.attachments) == 1
         first_work = first.origin_url.split("/")[-2]
         assert first.attachments[0].origin_url.split("/")[-2] == first_work
-        assert len(first.history_keys) == 2
+        assert len(first.history_keys) == 3
+        assert f"pixiv:{first_work}" in first.history_keys
         await pipeline.mark_sent(source, first)
 
         second = await pipeline._collect_pixiv_work(source, candidates, "百合")
@@ -364,6 +366,93 @@ def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: 
             "https://i.pximg.net/img-master/image.jpg",
         ]
         await pipeline.mark_sent(source, asset)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_pixiv_reports_download_failure_instead_of_dedupe_error(tmp_path: Path) -> None:
+    class FailingPixivFetcher:
+        async def download(self, url, destination, *, headers=None):
+            raise FetchError("不允许抓取本机或内网地址")
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        pipeline.fetcher = FailingPixivFetcher()  # type: ignore[assignment]
+        source = SourceConfig.from_mapping(
+            {"__template_key": "pixiv", "name": "Pixiv 默认指令", "rate_limit": -1}
+        )
+        candidate = Candidate(
+            ContentType.IMAGE,
+            url="https://i.pximg.net/image.jpg",
+            referer="https://www.pixiv.net/",
+            width=1200,
+            height=1800,
+            group_key="pixiv:failed-work",
+        )
+
+        with pytest.raises(PixivError, match="Pixiv 图片下载失败") as error:
+            await pipeline._collect_pixiv_work(source, [candidate], "白丝 jk")
+        assert "内网地址" in str(error.value)
+        assert "已去重" not in str(error.value)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_pixiv_work_remains_deduped_after_quality_url_changes(tmp_path: Path) -> None:
+    class QualityFetcher:
+        async def download(self, url, destination, *, headers=None):
+            output = io.BytesIO()
+            color = "red" if "original" in url else "blue"
+            Image.new("RGB", (1200, 1800), color).save(output, "JPEG")
+            body = output.getvalue()
+            destination.write_bytes(body)
+            return DownloadedFile(
+                url,
+                200,
+                "image/jpeg",
+                {},
+                destination,
+                hashlib.sha256(body).hexdigest(),
+                len(body),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        pipeline.fetcher = QualityFetcher()  # type: ignore[assignment]
+        source = SourceConfig.from_mapping(
+            {"__template_key": "pixiv", "name": "Pixiv", "dedupe": 0, "rate_limit": -1}
+        )
+        original_candidate = Candidate(
+            ContentType.IMAGE,
+            url="https://i.pximg.net/original.jpg",
+            group_key="pixiv:quality-work",
+            width=1200,
+            height=1800,
+        )
+        original_asset = await pipeline._collect_pixiv_work(source, [original_candidate], "白丝 jk")
+        assert original_asset
+        await pipeline.mark_sent(source, original_asset)
+
+        large_candidate = Candidate(
+            ContentType.IMAGE,
+            url="https://i.pximg.net/large.jpg",
+            group_key="pixiv:quality-work",
+            width=1200,
+            height=1800,
+        )
+        assert await pipeline._collect_pixiv_work(source, [large_candidate], "白丝 jk") is None
         await pipeline.close()
 
     asyncio.run(scenario())

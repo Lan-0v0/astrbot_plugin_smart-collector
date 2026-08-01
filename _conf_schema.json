@@ -216,6 +216,14 @@
             "labels": ["仅全年龄", "仅R18", "全部"],
             "default": "all"
           },
+          "quality": {
+            "description": "画质",
+            "type": "string",
+            "options": ["auto", "original", "large", "medium"],
+            "labels": ["Auto", "原图", "大图", "中图"],
+            "default": "auto",
+            "hint": "Auto 按原图、大图、中图顺序尝试；其他选项只使用指定画质。"
+          },
           "dedupe": {
             "description": "去重",
             "type": "int",

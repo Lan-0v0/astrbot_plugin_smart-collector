@@ -82,6 +82,24 @@ def test_hostname_resolving_to_private_ip_is_rejected(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_pixiv_cdn_allows_proxy_fake_ip_without_weakening_other_hosts(monkeypatch) -> None:
+    def fake_getaddrinfo(hostname, port, *, type):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.161", port))]
+
+    monkeypatch.setattr("smart_collector.fetcher.socket.getaddrinfo", fake_getaddrinfo)
+
+    async def scenario() -> None:
+        await AntiBotFetcher._validate_network_url("https://i.pximg.net/image.jpg")
+        try:
+            await AntiBotFetcher._validate_network_url("https://untrusted.example/image.jpg")
+        except FetchError as exc:
+            assert "内网" in str(exc)
+        else:
+            raise AssertionError("proxy fake IP exception leaked to an untrusted host")
+
+    asyncio.run(scenario())
+
+
 def test_redirect_to_private_ip_is_rejected(monkeypatch, tmp_path: Path) -> None:
     _allow_public_test_dns(monkeypatch)
 
