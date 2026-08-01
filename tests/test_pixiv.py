@@ -7,7 +7,13 @@ import httpx
 import pytest
 
 from smart_collector.models import ContentType, SourceConfig
-from smart_collector.pixiv import PixivAuthManager, PixivCollector, PixivError, parse_pixiv_query
+from smart_collector.pixiv import (
+    PixivAuthManager,
+    PixivCollector,
+    PixivError,
+    _callback_from_cdp_payload,
+    parse_pixiv_query,
+)
 
 
 def test_parse_multiple_tags_and_natural_language_age() -> None:
@@ -115,6 +121,7 @@ def test_pixiv_oauth_qr_and_callback_persist_token(monkeypatch, tmp_path: Path) 
     class FakeAsyncClient:
         def __init__(self, **kwargs) -> None:
             assert kwargs["follow_redirects"] is True
+            assert kwargs["headers"]["User-Agent"].startswith("PixivAndroidApp/")
 
         async def __aenter__(self):
             return self
@@ -151,3 +158,84 @@ def test_pixiv_oauth_rejects_callback_without_pending_login(tmp_path: Path) -> N
             await PixivAuthManager(tmp_path).finish("pixiv://account/login?code=value")
 
     asyncio.run(scenario())
+
+
+def test_pixiv_oauth_extracts_nested_callback_and_has_single_error_prefix(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"refresh_token": "nested-token"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, *, data):
+            assert data["code"] == "nested-code"
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    async def scenario() -> None:
+        auth = PixivAuthManager(tmp_path)
+        await auth.start()
+        await auth.finish(
+            "https://accounts.pixiv.net/post-redirect?"
+            "return_to=pixiv%3A%2F%2Faccount%2Flogin%3Fcode%3Dnested-code"
+        )
+        assert await auth.load_refresh_token() == "nested-token"
+
+        auth = PixivAuthManager(tmp_path)
+        await auth.start()
+        with pytest.raises(PixivError, match=r"^未找到授权 code$"):
+            await auth.finish(
+                "https://accounts.pixiv.net/post-redirect?"
+                "return_to=https%3A%2F%2Fapp-api.pixiv.net%2Fweb%2Fv1%2Fusers%2Fauth%2Fpixiv%2Fstart"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_pixiv_local_login_captures_cdp_callback(monkeypatch, tmp_path: Path) -> None:
+    callback = "pixiv://account/login?code=local-code"
+    assert (
+        _callback_from_cdp_payload(
+            {
+                "method": "Page.frameRequestedNavigation",
+                "params": {"url": callback},
+            }
+        )
+        == callback
+    )
+    assert not _callback_from_cdp_payload(
+        {"params": {"url": "https://example.com/?code=not-a-pixiv-callback"}}
+    )
+
+    captured: dict[str, str] = {}
+
+    async def fake_capture(self, login_url: str) -> str:
+        assert login_url.startswith("https://app-api.pixiv.net/web/v1/login?")
+        captured["login_url"] = login_url
+        return callback
+
+    async def fake_finish(self, value: str) -> None:
+        captured["callback"] = value
+
+    monkeypatch.setattr(PixivAuthManager, "_capture_local_callback", fake_capture)
+    monkeypatch.setattr(PixivAuthManager, "finish", fake_finish)
+
+    async def scenario() -> None:
+        await PixivAuthManager(tmp_path).login_local()
+
+    asyncio.run(scenario())
+    assert captured["callback"] == callback

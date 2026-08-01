@@ -4,9 +4,15 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 import shlex
+import shutil
+import socket
+import subprocess
+import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +31,9 @@ PIXIV_TOKEN_URL = "https://oauth.secure.pixiv.net/auth/token"
 PIXIV_REDIRECT_URI = "https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback"
 PIXIV_CLIENT_ID = "MOBrBDS8blbauoSck0ZfDbtuzpyT"
 PIXIV_CLIENT_SECRET = "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj"
+PIXIV_USER_AGENT = "PixivAndroidApp/5.0.234 (Android 11; Pixel 5)"
 PIXIV_TOKEN_FILE = "pixiv_auth.json"
+PIXIV_LOCAL_LOGIN_TIMEOUT = 600
 
 
 @dataclass(slots=True)
@@ -67,6 +75,90 @@ def _pixiv_image_urls(illust: Any) -> list[tuple[str, int, int]]:
     return list(dict.fromkeys(urls))
 
 
+def _oauth_callback_params(value: str) -> dict[str, list[str]]:
+    current = str(value or "").strip()
+    for _ in range(4):
+        parts = urlsplit(current)
+        params = parse_qs(parts.query) if parts.scheme else {"code": [current]}
+        if params.get("code") or params.get("error") or params.get("error_description"):
+            return params
+        nested = (params.get("return_to") or params.get("redirect_uri") or [""])[0]
+        if not nested or nested == current:
+            return params
+        current = nested
+    return {}
+
+
+def _callback_from_cdp_payload(value: Any) -> str:
+    if isinstance(value, str):
+        if value.startswith("pixiv://") and _oauth_callback_params(value).get("code"):
+            return value
+        return ""
+    if isinstance(value, dict):
+        for item in value.values():
+            callback = _callback_from_cdp_payload(item)
+            if callback:
+                return callback
+    elif isinstance(value, list):
+        for item in value:
+            callback = _callback_from_cdp_payload(item)
+            if callback:
+                return callback
+    return ""
+
+
+def _find_local_browser() -> Path | None:
+    candidates: list[Path] = []
+    for variable, suffixes in (
+        (
+            "LOCALAPPDATA",
+            (
+                "Google/Chrome/Application/chrome.exe",
+                "Microsoft/Edge/Application/msedge.exe",
+            ),
+        ),
+        (
+            "PROGRAMFILES",
+            (
+                "Google/Chrome/Application/chrome.exe",
+                "Microsoft/Edge/Application/msedge.exe",
+            ),
+        ),
+        (
+            "PROGRAMFILES(X86)",
+            (
+                "Google/Chrome/Application/chrome.exe",
+                "Microsoft/Edge/Application/msedge.exe",
+            ),
+        ),
+    ):
+        root = os.environ.get(variable)
+        if root:
+            candidates.extend(Path(root) / suffix for suffix in suffixes)
+    candidates.extend(
+        Path(item)
+        for item in (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+        )
+    )
+    for command in ("chrome", "google-chrome", "chromium", "msedge", "microsoft-edge"):
+        resolved = shutil.which(command)
+        if resolved:
+            candidates.append(Path(resolved))
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
 def parse_pixiv_query(query: str, configured_age: str = "all") -> tuple[str, str]:
     text = str(query or "").strip()
     age = configured_age if configured_age in {"all", "safe", "r18"} else "all"
@@ -104,6 +196,7 @@ class PixivAuthManager:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / PIXIV_TOKEN_FILE
         self.pending: PendingPixivLogin | None = None
+        self._local_login_lock = asyncio.Lock()
 
     async def start(self) -> str:
         verifier = secrets.token_urlsafe(48)
@@ -127,13 +220,12 @@ class PixivAuthManager:
         if pending is None or datetime.now(timezone.utc).timestamp() - pending.created_at > 600:
             raise PixivError("Pixiv 登录二维码已过期，请重新发送 /pixiv登陆")
         value = str(callback or "").strip()
-        parts = urlsplit(value)
-        params = parse_qs(parts.query) if parts.scheme else {"code": [value]}
+        params = _oauth_callback_params(value)
         code = (params.get("code") or [""])[0]
         state = (params.get("state") or [""])[0]
         if not code:
             error = (params.get("error_description") or params.get("error") or [""])[0]
-            raise PixivError(f"Pixiv 登录失败：{error or '未找到授权 code'}")
+            raise PixivError(error or "未找到授权 code")
         if state and state != pending.state:
             raise PixivError("Pixiv 登录回调 state 校验失败")
 
@@ -148,7 +240,11 @@ class PixivAuthManager:
             "include_policy": "true",
             "redirect_uri": PIXIV_REDIRECT_URI,
         }
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers={"User-Agent": PIXIV_USER_AGENT},
+        ) as client:
             response = await client.post(PIXIV_TOKEN_URL, data=payload)
         if response.status_code >= 400:
             raise PixivError(f"Pixiv Token 交换失败：HTTP {response.status_code}")
@@ -169,6 +265,138 @@ class PixivAuthManager:
             "utf-8",
         )
         self.pending = None
+
+    async def login_local(self) -> None:
+        if self._local_login_lock.locked():
+            raise PixivError("已有 Pixiv 本地登录窗口正在等待授权")
+        async with self._local_login_lock:
+            login_url = await self.start()
+            callback = await self._capture_local_callback(login_url)
+            await self.finish(callback)
+
+    async def _capture_local_callback(self, login_url: str) -> str:
+        browser = _find_local_browser()
+        if browser is None:
+            raise PixivError("未找到 Chrome 或 Edge，无法使用本地自动登录")
+        port = _free_local_port()
+        profile = self.path.parent / "pixiv_browser_profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        command = [
+            str(browser),
+            f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-mode",
+            "--incognito",
+            "--new-window",
+            "about:blank",
+        ]
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            process = await asyncio.to_thread(
+                subprocess.Popen,
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise PixivError(f"无法启动本地浏览器：{exc}") from exc
+
+        websocket_url = ""
+        try:
+            websocket_url = await self._wait_for_page(port, process)
+            return await self._listen_for_callback(websocket_url, login_url)
+        finally:
+            if websocket_url:
+                await self._close_browser(websocket_url)
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    process.terminate()
+                with suppress(ProcessLookupError, subprocess.TimeoutExpired):
+                    await asyncio.to_thread(process.wait, 5)
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    process.kill()
+
+    @staticmethod
+    async def _wait_for_page(port: int, process: subprocess.Popen) -> str:
+        import httpx
+
+        deadline = asyncio.get_running_loop().time() + 20
+        async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
+            while asyncio.get_running_loop().time() < deadline:
+                if process.poll() is not None:
+                    raise PixivError("本地浏览器启动后意外退出")
+                try:
+                    response = await client.get(f"http://127.0.0.1:{port}/json/list")
+                    for target in response.json():
+                        if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+                            return str(target["webSocketDebuggerUrl"])
+                except (httpx.HTTPError, ValueError, TypeError):
+                    pass
+                await asyncio.sleep(0.2)
+        raise PixivError("连接本地浏览器超时")
+
+    @staticmethod
+    async def _listen_for_callback(websocket_url: str, login_url: str) -> str:
+        import websockets
+
+        async with websockets.connect(
+            websocket_url,
+            open_timeout=10,
+            close_timeout=2,
+            max_size=2 * 1024 * 1024,
+        ) as connection:
+            command_id = 0
+            for method, params in (
+                ("Page.enable", {}),
+                ("Network.enable", {}),
+                ("Page.navigate", {"url": login_url}),
+            ):
+                command_id += 1
+                await connection.send(
+                    json.dumps({"id": command_id, "method": method, "params": params})
+                )
+            deadline = asyncio.get_running_loop().time() + PIXIV_LOCAL_LOGIN_TIMEOUT
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise PixivError("本地 Pixiv 登录已超时，请重新发送 /pixiv登陆 本地")
+                try:
+                    message = await asyncio.wait_for(connection.recv(), min(remaining, 1.0))
+                except TimeoutError:
+                    command_id += 1
+                    await connection.send(
+                        json.dumps({"id": command_id, "method": "Page.getNavigationHistory"})
+                    )
+                    continue
+                try:
+                    payload = json.loads(message)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                callback = _callback_from_cdp_payload(payload)
+                if callback:
+                    return callback
+
+    @staticmethod
+    async def _close_browser(websocket_url: str) -> None:
+        import websockets
+
+        try:
+            async with websockets.connect(
+                websocket_url, open_timeout=2, close_timeout=1
+            ) as connection:
+                await connection.send(json.dumps({"id": 1, "method": "Browser.close"}))
+                with suppress(Exception):
+                    await asyncio.wait_for(connection.recv(), 2)
+        except Exception:
+            pass
 
     async def load_refresh_token(self) -> str:
         try:

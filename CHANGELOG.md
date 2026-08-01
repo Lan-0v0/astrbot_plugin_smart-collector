@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.1 - 2026-08-01
+
+- 增加 `/pixiv登陆 本地`，自动启动本机 Chrome/Edge 并通过 DevTools 协议截获 Pixiv OAuth code。
+- 本地浏览器使用插件独立配置目录，不读取账号密码；登录完成后自动交换并保存 Refresh Token。
+- 保留二维码及手动 URL/code 登录回退，支持嵌套回调地址解析并修复登录错误前缀重复。
+- Pixiv Token 请求补充 Android User-Agent，提高 OAuth 接口兼容性。
+
 ## v0.2.0 - 2026-08-01
 
 - 增加 Pixiv 自定义爬取项，支持全年龄、R18 和全部年龄段的多 Tag 图片搜索。

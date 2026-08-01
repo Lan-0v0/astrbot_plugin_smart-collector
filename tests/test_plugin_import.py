@@ -136,6 +136,30 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
 
     asyncio.run(command_scenario())
 
+    class LocalAuth:
+        called = False
+
+        async def login_local(self):
+            self.called = True
+
+    local_auth = LocalAuth()
+    plugin.pipeline = types.SimpleNamespace(pixiv=types.SimpleNamespace(auth=local_auth))
+
+    class LocalLoginEvent:
+        message_str = "/pixiv登陆 本地"
+
+        @staticmethod
+        def plain_result(value):
+            return value
+
+    async def local_login_scenario() -> None:
+        results = [item async for item in plugin.pixiv_login_command(LocalLoginEvent())]
+        assert local_auth.called
+        assert results[0].startswith("已打开本地 Pixiv 登录窗口")
+        assert results[1] == "Pixiv 登录成功，Refresh Token 已保存。"
+
+    asyncio.run(local_login_scenario())
+
     movie_source = module.SourceConfig.from_mapping(
         {
             "name": "影片",

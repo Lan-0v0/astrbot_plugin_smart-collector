@@ -39,6 +39,7 @@ PIXIV_HELP = (
     "Pixiv 专属帮助\n"
     "/pixiv [Tag1] [Tag2] ... - 搜索同时符合多个 Tag 的图片\n"
     "/pixiv登陆 - 生成 Pixiv 登录二维码\n"
+    "/pixiv登陆 本地 - 在本机浏览器中登录并自动获取授权\n"
     "/pixiv登陆 [URL] - 使用登录后的回调 URL 完成授权\n"
     "自定义专属指令示例：/p 百合 JK 白丝"
 )
@@ -100,7 +101,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.2.0",
+    "v0.2.1",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -143,7 +144,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.2.0 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.2.1 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -163,6 +164,13 @@ class SmartCollectorPlugin(Star):
             return
         callback = self._after_command(event.message_str)
         try:
+            if callback == "本地":
+                yield event.plain_result(
+                    "已打开本地 Pixiv 登录窗口，请在十分钟内完成登录，插件将自动获取授权。"
+                )
+                await self.pipeline.pixiv.auth.login_local()
+                yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
+                return
             if callback:
                 await self.pipeline.pixiv.auth.finish(callback)
                 yield event.plain_result("Pixiv 登录成功，Refresh Token 已保存。")
@@ -171,7 +179,11 @@ class SmartCollectorPlugin(Star):
             yield event.chain_result(
                 [
                     Comp.Image.fromBytes(_qr_png(login_url)),
-                    Comp.Plain("在登陆后使用“/pixiv登陆 [URL]”以登陆"),
+                    Comp.Plain(
+                        "在登陆后使用“/pixiv登陆 [URL]”以登陆\n"
+                        "请复制最终包含 code 的 pixiv://account/login 回调地址；"
+                        "accounts.pixiv.net/post-redirect 中间地址不能用于登录。"
+                    ),
                 ]
             )
         except Exception as exc:
