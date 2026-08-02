@@ -128,10 +128,12 @@ python scripts/live_smoke.py --pektino-only --video-quality highest
 联网烟测默认覆盖妖狐 API 和 Mukyu 随机图片；`--include-video` 添加 Avbebe，
 `--include-pektino` 添加 Pektino 随机分页视频；`--pektino-only` 只访问 Pektino，适合快速回归。
 目标站离线、DNS 污染或出口策略阻断会被明确报告为外部网络失败，不会被伪装为成功。
+使用 Clash 等 TUN Fake-IP 模式时，域名解析得到的 `198.18.0.0/15` 代理映射地址会正常放行；
+直接填写该网段 IP 以及其他本机、私网、链路本地地址仍会被安全校验拒绝。
 
 ## 版本
 
-当前版本：`v0.3.4`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.3.5`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import curl_cffi.requests
 import httpx
+import pytest
 
 from smart_collector.fetcher import AntiBotFetcher, FetchError
 from smart_collector.models import FetchResponse
@@ -82,7 +83,9 @@ def test_hostname_resolving_to_private_ip_is_rejected(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_pixiv_cdn_allows_proxy_fake_ip_without_weakening_other_hosts(monkeypatch) -> None:
+def test_hostname_allows_proxy_fake_ip_but_literal_and_private_dns_remain_blocked(
+    monkeypatch,
+) -> None:
     def fake_getaddrinfo(hostname, port, *, type):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.161", port))]
 
@@ -90,12 +93,18 @@ def test_pixiv_cdn_allows_proxy_fake_ip_without_weakening_other_hosts(monkeypatc
 
     async def scenario() -> None:
         await AntiBotFetcher._validate_network_url("https://i.pximg.net/image.jpg")
-        try:
-            await AntiBotFetcher._validate_network_url("https://untrusted.example/image.jpg")
-        except FetchError as exc:
-            assert "内网" in str(exc)
-        else:
-            raise AssertionError("proxy fake IP exception leaked to an untrusted host")
+        await AntiBotFetcher._validate_network_url("https://x.com/user/status/1")
+        await AntiBotFetcher._validate_network_url("https://video.twimg.com/video.mp4")
+
+        with pytest.raises(FetchError, match="内网"):
+            await AntiBotFetcher._validate_network_url("http://198.18.0.161/video.mp4")
+
+        def private_getaddrinfo(hostname, port, *, type):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", port))]
+
+        monkeypatch.setattr("smart_collector.fetcher.socket.getaddrinfo", private_getaddrinfo)
+        with pytest.raises(FetchError, match="内网"):
+            await AntiBotFetcher._validate_network_url("https://internal.example/video.mp4")
 
     asyncio.run(scenario())
 

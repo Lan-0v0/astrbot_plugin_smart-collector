@@ -42,7 +42,6 @@ CHALLENGE_MARKERS = (
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 MAX_REDIRECTS = 10
 PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
-PIXIV_PROXY_HOSTS = {"i.pximg.net"}
 
 
 class FetchError(RuntimeError):
@@ -470,11 +469,11 @@ class AntiBotFetcher:
                 address = ipaddress.ip_address(socket_address[0])
             except (IndexError, ValueError, TypeError) as exc:
                 raise FetchError("无法解析目标地址") from exc
-            is_pixiv_proxy_fake_ip = (
-                hostname.lower().rstrip(".") in PIXIV_PROXY_HOSTS
-                and address in PROXY_FAKE_IP_NETWORK
-            )
-            if cls._is_blocked_address(address) and not is_pixiv_proxy_fake_ip:
+            # TUN proxy clients map public hostnames into RFC 2544's benchmark
+            # range and route those synthetic addresses internally. IP literals
+            # are still rejected by _validate_url before DNS resolution.
+            is_proxy_fake_ip = address in PROXY_FAKE_IP_NETWORK
+            if cls._is_blocked_address(address) and not is_proxy_fake_ip:
                 raise FetchError("不允许抓取本机或内网地址")
 
     @staticmethod
