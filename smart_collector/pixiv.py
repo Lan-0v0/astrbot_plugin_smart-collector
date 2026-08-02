@@ -49,10 +49,8 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
-def _pixiv_image_urls(
-    illust: Any, quality: str = "auto"
-) -> list[tuple[str, int, int, tuple[str, ...]]]:
-    urls: list[tuple[str, int, int, tuple[str, ...]]] = []
+def _pixiv_image_urls(illust: Any, quality: str = "original") -> list[tuple[str, int, int]]:
+    urls: list[tuple[str, int, int]] = []
     seen_urls: set[str] = set()
 
     def append_image_urls(image_urls: Any, original_url: Any, width: int, height: int) -> None:
@@ -61,18 +59,11 @@ def _pixiv_image_urls(
             "large": str(_value(image_urls, "large", "") or "").strip(),
             "medium": str(_value(image_urls, "medium", "") or "").strip(),
         }
-        quality_order = ("original", "large", "medium") if quality == "auto" else (quality,)
-        ordered_urls = tuple(
-            dict.fromkeys(
-                available_urls[quality_name]
-                for quality_name in quality_order
-                if available_urls.get(quality_name)
-            )
-        )
-        if not ordered_urls or ordered_urls[0] in seen_urls:
+        selected_url = available_urls.get(quality, "")
+        if not selected_url or selected_url in seen_urls:
             return
-        seen_urls.add(ordered_urls[0])
-        urls.append((ordered_urls[0], width, height, ordered_urls[1:]))
+        seen_urls.add(selected_url)
+        urls.append((selected_url, width, height))
 
     width = int(_value(illust, "width", 0) or 0)
     height = int(_value(illust, "height", 0) or 0)
@@ -471,7 +462,7 @@ class PixivCollector:
             if not illust_id and image_urls:
                 illust_id = hashlib.sha1(image_urls[0][0].encode()).hexdigest()[:20]
             group_key = f"pixiv:{illust_id}"
-            for page_index, (url, width, height, alternate_urls) in enumerate(image_urls):
+            for page_index, (url, width, height) in enumerate(image_urls):
                 if url in seen:
                     continue
                 seen.add(url)
@@ -479,7 +470,6 @@ class PixivCollector:
                     Candidate(
                         ContentType.IMAGE,
                         url=url,
-                        alternate_urls=alternate_urls,
                         title=title,
                         referer="https://www.pixiv.net/",
                         width=width,
@@ -493,7 +483,6 @@ class PixivCollector:
                 )
         if not candidates:
             quality_labels = {
-                "auto": "Auto",
                 "original": "原图",
                 "large": "大图",
                 "medium": "中图",

@@ -127,7 +127,7 @@ class SourceConfig:
     target_qq_groups: tuple[str, ...] = ()
     pixiv_refresh_token: str = ""
     pixiv_age_mode: str = "all"
-    pixiv_quality: str = "auto"
+    pixiv_quality: str = "original"
     pixiv_r18_to_pdf: bool = False
 
     @classmethod
@@ -171,9 +171,9 @@ class SourceConfig:
         pixiv_age_mode = str(value.get("age_mode") or "all").strip().lower()
         if pixiv_age_mode not in {"all", "safe", "r18"}:
             pixiv_age_mode = "all"
-        pixiv_quality = str(value.get("quality") or "auto").strip().lower()
-        if pixiv_quality not in {"auto", "original", "large", "medium"}:
-            pixiv_quality = "auto"
+        pixiv_quality = str(value.get("quality") or "original").strip().lower()
+        if pixiv_quality not in {"original", "large", "medium"}:
+            pixiv_quality = "original"
         url = str(value.get("url") or "").strip()
         if template == "pixiv":
             url = url or "https://app-api.pixiv.net/"
@@ -254,7 +254,6 @@ class Candidate:
     group_key: str = ""
     page_index: int = 0
     r18: bool = False
-    alternate_urls: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

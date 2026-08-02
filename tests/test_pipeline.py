@@ -17,7 +17,7 @@ from smart_collector.models import (
     FetchResponse,
     SourceConfig,
 )
-from smart_collector.pipeline import CollectorPipeline
+from smart_collector.pipeline import CollectionError, CollectorPipeline
 from smart_collector.pixiv import PixivError
 
 
@@ -236,6 +236,37 @@ def test_pipeline_reuses_cached_media(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_pipeline_close_waits_for_active_collection_and_rejects_new_ones(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_collection() -> None:
+            async with pipeline._collection_scope():
+                entered.set()
+                await release.wait()
+
+        task = asyncio.create_task(slow_collection())
+        await entered.wait()
+        closing = asyncio.create_task(pipeline.close())
+        await asyncio.sleep(0.05)
+        assert not closing.done()
+
+        with pytest.raises(CollectionError, match="正在重新加载"):
+            async with pipeline._collection_scope():
+                pass
+
+        release.set()
+        await task
+        await closing
+
+    asyncio.run(scenario())
+
+
 def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Path) -> None:
     class PixivImageFetcher:
         def __init__(self) -> None:
@@ -308,8 +339,8 @@ def test_pixiv_collects_complete_works_and_rotates_after_mark_sent(tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: Path) -> None:
-    class FallbackPixivImageFetcher:
+def test_pixiv_with_referer_is_not_redownloaded_after_validation_failure(tmp_path: Path) -> None:
+    class CountingFetcher:
         def __init__(self) -> None:
             self.downloads: list[str] = []
 
@@ -317,19 +348,7 @@ def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: 
             self.downloads.append(url)
             if "/img-original/" in url:
                 raise FetchError("模拟原图下载失败")
-            output = io.BytesIO()
-            Image.new("RGB", (1200, 1800), "red").save(output, "JPEG")
-            body = output.getvalue()
-            destination.write_bytes(body)
-            return DownloadedFile(
-                url,
-                200,
-                "image/jpeg",
-                {},
-                destination,
-                hashlib.sha256(body).hexdigest(),
-                len(body),
-            )
+            raise AssertionError("alternate URL must not be downloaded")
 
         async def close(self) -> None:
             return None
@@ -338,7 +357,7 @@ def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: 
         pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
         await pipeline.initialize()
         await pipeline.fetcher.close()
-        fetcher = FallbackPixivImageFetcher()
+        fetcher = CountingFetcher()
         pipeline.fetcher = fetcher  # type: ignore[assignment]
         source = SourceConfig.from_mapping(
             {
@@ -351,21 +370,15 @@ def test_pixiv_falls_back_to_large_image_when_original_download_fails(tmp_path: 
         candidate = Candidate(
             ContentType.IMAGE,
             url="https://i.pximg.net/img-original/image.jpg",
-            alternate_urls=("https://i.pximg.net/img-master/image.jpg",),
             referer="https://www.pixiv.net/",
             width=1200,
             height=1800,
-            group_key="pixiv:work-fallback",
+            group_key="pixiv:work-referer",
         )
 
-        asset = await pipeline._collect_pixiv_work(source, [candidate], "白丝 jk")
-        assert asset and asset.exists
-        assert asset.origin_url == candidate.url
-        assert fetcher.downloads == [
-            "https://i.pximg.net/img-original/image.jpg",
-            "https://i.pximg.net/img-master/image.jpg",
-        ]
-        await pipeline.mark_sent(source, asset)
+        with pytest.raises(PixivError, match="Pixiv 图片下载失败"):
+            await pipeline._collect_pixiv_work(source, [candidate], "白丝 jk")
+        assert fetcher.downloads == ["https://i.pximg.net/img-original/image.jpg"]
         await pipeline.close()
 
     asyncio.run(scenario())
@@ -385,7 +398,12 @@ def test_pixiv_reports_download_failure_instead_of_dedupe_error(tmp_path: Path) 
         await pipeline.fetcher.close()
         pipeline.fetcher = FailingPixivFetcher()  # type: ignore[assignment]
         source = SourceConfig.from_mapping(
-            {"__template_key": "pixiv", "name": "Pixiv 默认指令", "rate_limit": -1}
+            {
+                "__template_key": "pixiv",
+                "name": "Pixiv 默认指令",
+                "rate_limit": -1,
+                "refresh_token": "test-token",
+            }
         )
         candidate = Candidate(
             ContentType.IMAGE,
@@ -400,6 +418,50 @@ def test_pixiv_reports_download_failure_instead_of_dedupe_error(tmp_path: Path) 
             await pipeline._collect_pixiv_work(source, [candidate], "白丝 jk")
         assert "内网地址" in str(error.value)
         assert "已去重" not in str(error.value)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_single_source_failure_does_not_prefix_source_name(tmp_path: Path) -> None:
+    class FailingFetcher:
+        async def download(self, url, destination, *, headers=None):
+            raise FetchError("不允许抓取本机或内网地址")
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        pipeline.fetcher = FailingFetcher()  # type: ignore[assignment]
+
+        class FakePixiv:
+            async def candidates(self, source, query):
+                return [
+                    Candidate(
+                        ContentType.IMAGE,
+                        url="https://i.pximg.net/image.jpg",
+                        referer="https://www.pixiv.net/",
+                        width=1200,
+                        height=1800,
+                        group_key="pixiv:single-source-failure",
+                    )
+                ]
+
+        pipeline.pixiv = FakePixiv()  # type: ignore[assignment]
+        source = SourceConfig.from_mapping(
+            {
+                "__template_key": "pixiv",
+                "name": "Pixiv 默认指令",
+                "rate_limit": -1,
+            }
+        )
+        with pytest.raises(CollectionError) as error:
+            await pipeline.collect_many([source], (ContentType.IMAGE,), "user", "白丝 jk")
+        assert "Pixiv 默认指令:" not in str(error.value)
+        assert "Pixiv 图片下载失败" in str(error.value)
         await pipeline.close()
 
     asyncio.run(scenario())

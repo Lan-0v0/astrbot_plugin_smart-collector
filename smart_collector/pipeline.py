@@ -8,7 +8,7 @@ import random
 import re
 import time
 import uuid
-from dataclasses import replace
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -87,15 +87,44 @@ class CollectorPipeline:
         self._last_requests: dict[tuple[str, str], float] = {}
         self._pixiv_selection_lock = asyncio.Lock()
         self._pixiv_reserved: dict[str, set[str]] = {}
+        self._collection_condition = asyncio.Condition()
+        self._active_collections = 0
+        self._closing = False
 
     async def initialize(self) -> None:
         await self.cache.initialize()
 
     async def close(self) -> None:
+        async with self._collection_condition:
+            self._closing = True
+            await self._collection_condition.wait_for(lambda: self._active_collections == 0)
         await self.fetcher.close()
         await self.cache.close()
 
+    @asynccontextmanager
+    async def _collection_scope(self):
+        async with self._collection_condition:
+            if self._closing:
+                raise CollectionError("Smart Collector 正在重新加载，请稍后重试")
+            self._active_collections += 1
+        try:
+            yield
+        finally:
+            async with self._collection_condition:
+                self._active_collections -= 1
+                self._collection_condition.notify_all()
+
     async def collect_many(
+        self,
+        sources: list[SourceConfig],
+        requested: tuple[ContentType, ...] | None,
+        user_key: str,
+        query: str = "",
+    ) -> tuple[SourceConfig, CollectedAsset]:
+        async with self._collection_scope():
+            return await self._collect_many(sources, requested, user_key, query)
+
+    async def _collect_many(
         self,
         sources: list[SourceConfig],
         requested: tuple[ContentType, ...] | None,
@@ -106,7 +135,7 @@ class CollectorPipeline:
         if not enabled:
             raise CollectionError("没有已启用的自定义爬取项")
         results = await asyncio.gather(
-            *(self.collect(source, requested, user_key, query) for source in enabled),
+            *(self._collect(source, requested, user_key, query) for source in enabled),
             return_exceptions=True,
         )
         successful: list[tuple[SourceConfig, CollectedAsset]] = []
@@ -117,11 +146,23 @@ class CollectorPipeline:
             else:
                 successful.append((source, result))
         if not successful:
+            if len(errors) == 1:
+                raise CollectionError(str(results[0]))
             raise CollectionError("；".join(errors) or "没有抓取到可发送内容")
         successful.sort(key=lambda item: CONTENT_PRIORITY.index(item[1].content_type))
         return successful[0]
 
     async def collect(
+        self,
+        source: SourceConfig,
+        requested: tuple[ContentType, ...] | None,
+        user_key: str,
+        query: str = "",
+    ) -> CollectedAsset:
+        async with self._collection_scope():
+            return await self._collect(source, requested, user_key, query)
+
+    async def _collect(
         self,
         source: SourceConfig,
         requested: tuple[ContentType, ...] | None,
@@ -837,18 +878,19 @@ class CollectorPipeline:
             if not target.exists():
                 await asyncio.to_thread(target.write_bytes, body)
         else:
+            headers = self._candidate_headers(source, candidate)
             temporary = self.cache.files_dir / f".download-{uuid.uuid4().hex}"
 
-            async def validate_download(downloaded, download_candidate: Candidate) -> str:
+            async def validate_download(downloaded) -> str:
                 if downloaded.status >= 400:
                     raise FetchError(f"资源返回 HTTP {downloaded.status}")
-                current_mime = downloaded.content_type or download_candidate.mime_type
+                current_mime = downloaded.content_type or candidate.mime_type
                 actual_type = self.extractor._mime_type(current_mime)
-                if actual_type and actual_type is not download_candidate.content_type:
+                if actual_type and actual_type is not candidate.content_type:
                     raise FetchError("资源响应类型与解析类型不一致")
                 if "html" in current_mime or "json" in current_mime:
                     raise FetchError("候选资源不是可下载媒体")
-                if download_candidate.content_type is ContentType.IMAGE:
+                if candidate.content_type is ContentType.IMAGE:
                     actual_size = downloaded.local_path.stat().st_size
                     if self.image_min_bytes >= 0 and actual_size < self.image_min_bytes:
                         raise FetchError(f"候选图片小于 {self.image_min_bytes // 1024} KB 忽略阈值")
@@ -860,48 +902,30 @@ class CollectorPipeline:
                         raise FetchError("候选图片文件无效") from exc
                     if width <= 8 or height <= 8 or width * height <= 256:
                         raise FetchError("候选图片是极小占位图")
-                    download_candidate.width = width
-                    download_candidate.height = height
+                    candidate.width = width
+                    candidate.height = height
                 return current_mime
 
             try:
-                download_urls = tuple(dict.fromkeys((candidate.url, *candidate.alternate_urls)))
-                last_error: Exception | None = None
-                for download_url in download_urls:
-                    download_candidate = replace(candidate, url=download_url)
-                    try:
-                        downloaded = await self.fetcher.download(
-                            download_url,
-                            temporary,
-                            headers=self._candidate_headers(source, download_candidate),
-                        )
-                        try:
-                            mime_type = await validate_download(downloaded, download_candidate)
-                        except FetchError:
-                            if (
-                                not download_candidate.referer
-                                or urlsplit(download_url).hostname == urlsplit(source.url).hostname
-                            ):
-                                raise
-                            downloaded = await self.fetcher.download(
-                                download_url,
-                                temporary,
-                                headers=self._candidate_headers(
-                                    source,
-                                    download_candidate,
-                                    include_cross_origin_referer=True,
-                                ),
-                            )
-                            mime_type = await validate_download(downloaded, download_candidate)
-                        candidate.width = download_candidate.width
-                        candidate.height = download_candidate.height
-                        break
-                    except (CollectionError, FetchError, OSError) as exc:
-                        last_error = exc
-                else:
-                    if last_error is not None:
-                        raise last_error
-                    raise FetchError("候选资源没有可用下载地址")
+                downloaded = await self.fetcher.download(candidate.url, temporary, headers=headers)
+                try:
+                    mime_type = await validate_download(downloaded)
+                except FetchError:
+                    should_retry_with_referer = (
+                        "Referer" not in headers
+                        and bool(candidate.referer)
+                        and urlsplit(candidate.url).hostname != urlsplit(source.url).hostname
+                    )
+                    if not should_retry_with_referer:
+                        raise
+                    downloaded = await self.fetcher.download(
+                        candidate.url,
+                        temporary,
+                        headers=self._candidate_headers(
+                            source, candidate, include_cross_origin_referer=True
+                        ),
+                    )
+                    mime_type = await validate_download(downloaded)
                 origin_url = candidate.url
                 content_digest = downloaded.sha256
                 target = self.cache.files_dir / (

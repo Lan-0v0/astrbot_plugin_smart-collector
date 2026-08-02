@@ -219,10 +219,10 @@
           "quality": {
             "description": "画质",
             "type": "string",
-            "options": ["auto", "original", "large", "medium"],
-            "labels": ["Auto", "原图", "大图", "中图"],
-            "default": "auto",
-            "hint": "Auto 按原图、大图、中图顺序尝试；其他选项只使用指定画质。"
+            "options": ["original", "large", "medium"],
+            "labels": ["原图", "大图", "中图"],
+            "default": "original",
+            "hint": "只使用指定画质，不执行多规格串行回退。"
           },
           "dedupe": {
             "description": "去重",

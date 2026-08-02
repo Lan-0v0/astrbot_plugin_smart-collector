@@ -80,9 +80,9 @@ def test_schema_contains_required_default_api() -> None:
         "target_qq_groups",
     ]
     assert pixiv_items["age_mode"]["default"] == "all"
-    assert pixiv_items["quality"]["options"] == ["auto", "original", "large", "medium"]
-    assert pixiv_items["quality"]["labels"] == ["Auto", "原图", "大图", "中图"]
-    assert pixiv_items["quality"]["default"] == "auto"
+    assert pixiv_items["quality"]["options"] == ["original", "large", "medium"]
+    assert pixiv_items["quality"]["labels"] == ["原图", "大图", "中图"]
+    assert pixiv_items["quality"]["default"] == "original"
     source = load_sources({"custom_sources": [default]})[0]
     assert source.headers == {"key": "RgDEYLevGRcMSNIF8z9"}
     assert source.content_types == (ContentType.IMAGE,)
@@ -92,7 +92,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.3.2"
+    assert metadata["version"] == "v0.3.3"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -203,4 +203,4 @@ def test_pixiv_source_normalization_without_url() -> None:
     legacy_source = SourceConfig.from_mapping(
         {"__template_key": "pixiv", "name": "旧配置", "quality": "invalid"}
     )
-    assert legacy_source.pixiv_quality == "auto"
+    assert legacy_source.pixiv_quality == "original"

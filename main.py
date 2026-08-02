@@ -131,7 +131,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.3.2",
+    "v0.3.3",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -181,7 +181,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.3.2 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.3.3 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -554,7 +554,7 @@ class SmartCollectorPlugin(Star):
             rate_limit=1.0,
             schedules=(),
             pixiv_age_mode="all",
-            pixiv_quality="auto",
+            pixiv_quality="original",
             pixiv_r18_to_pdf=True,
         )
 

@@ -36,17 +36,9 @@ def test_pixiv_image_quality_modes_select_expected_urls() -> None:
         },
         "meta_pages": [],
     }
-    assert _pixiv_image_urls(illustration, "auto") == [
-        (
-            "https://i.pximg.net/original.jpg",
-            1200,
-            1800,
-            ("https://i.pximg.net/large.jpg", "https://i.pximg.net/medium.jpg"),
-        )
-    ]
     for quality in ("original", "large", "medium"):
         assert _pixiv_image_urls(illustration, quality) == [
-            (f"https://i.pximg.net/{quality}.jpg", 1200, 1800, ())
+            (f"https://i.pximg.net/{quality}.jpg", 1200, 1800)
         ]
 
 
@@ -141,10 +133,7 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
         )
         all_candidates = await collector.candidates(all_source, "百合 JK")
         safe_candidate = next(item for item in all_candidates if not item.r18)
-        assert safe_candidate.alternate_urls == (
-            "https://i.pximg.net/img-master/safe.jpg",
-            "https://i.pximg.net/img-master/safe-medium.jpg",
-        )
+        assert safe_candidate.url == "https://i.pximg.net/img-original/safe.jpg"
 
     asyncio.run(scenario())
 
