@@ -131,7 +131,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.3.4",
+    "v0.3.3",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -181,7 +181,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.3.4 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.3.3 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -378,25 +378,23 @@ class SmartCollectorPlugin(Star):
     ) -> list:
         content: list = []
         assets = (asset, *asset.attachments)
-        contains_non_forwardable_component = False
+        contains_file = False
         for item in assets:
             path = str(item.local_path) if item.local_path else ""
             if item.mime_type in {"application/pdf", "application/zip"}:
                 file_name = "炸金~❤️.pdf" if item.mime_type == "application/pdf" else item.title
                 content.append(Comp.File(name=file_name or Path(path).name, file=path))
-                contains_non_forwardable_component = True
+                contains_file = True
             elif item.content_type is ContentType.IMAGE:
                 content.append(Comp.Image.fromFileSystem(path))
             elif item.content_type is ContentType.VIDEO:
                 content.append(Comp.Video.fromFileSystem(path))
-                contains_non_forwardable_component = True
             elif item.content_type is ContentType.AUDIO:
                 content.append(Comp.Record.fromFileSystem(path))
-                contains_non_forwardable_component = True
             else:
                 text = item.summary or item.text
                 content.append(Comp.Plain(text[:20_000]))
-        if source.forward_mode == "none" or contains_non_forwardable_component:
+        if source.forward_mode == "none" or contains_file:
             return content
         uin = source.custom_qq if source.forward_mode == "custom" else sender_id
         name = source.name if source.forward_mode == "custom" else (sender_name or source.name)

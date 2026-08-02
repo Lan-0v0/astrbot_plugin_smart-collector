@@ -4,7 +4,7 @@ short_desc: 支持视频、音频、图片和文字的并发自适应采集插�
 desc: >-
   可配置网站与 API 数据源，支持专属指令、LLM 自然语言工具、缓存与去重、限速、
   随机翻页、流式下载、自适应解析、TLS/浏览器指纹兼容、图片转 PDF、加密压缩和文字摘要。
-version: v0.3.4
+version: v0.3.3
 author: Lan-0v0
 repo: https://github.com/Lan-0v0/astrbot_plugin_smart-collector
 astrbot_version: ">=4.10.4,<5"

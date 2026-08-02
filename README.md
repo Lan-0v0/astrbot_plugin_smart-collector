@@ -11,7 +11,7 @@ AstrBot 智能采集插件。一个配置面板内管理多个网站/API 数据�
 - `asyncio` 并发采集；HTTP/2、重试、Cookie 轮换和 `curl-cffi` 浏览器 TLS 指纹回退。
 - 缓存媒体文件和文字，命中时复用本地数据；去重支持关闭或永久去重。
 - 首次成功后记录 HTML 选择器或 JSON 路径；结构失效时自动回退到启发式解析并更新画像。
-- 可选图片转 PDF、图片/视频 ZIP 压缩、AES 压缩密码、OneBot 图片/文本合并转发节点；视频、音频和文件会自动直接发送以确保客户端可查看。
+- 可选图片转 PDF、图片/视频 ZIP 压缩、AES 压缩密码、OneBot 合并转发节点。
 - 用户级限速、按天/周/月/星期定时发送、缓存自动清理。
 - 可选择 AstrBot 已配置模型为文字生成摘要。
 - 视频页没有直链时使用 `yt-dlp` 通用解析器作为回退。
@@ -128,7 +128,7 @@ python scripts/live_smoke.py --pektino-only --video-quality highest
 
 ## 版本
 
-当前版本：`v0.3.4`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v0.3.3`。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

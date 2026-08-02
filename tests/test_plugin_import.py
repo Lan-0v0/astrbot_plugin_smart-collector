@@ -123,20 +123,6 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert len(forwarded[0].kwargs["content"]) == 1
     assert type(forwarded[0].kwargs["content"][0]).__name__ == "Image"
 
-    video_asset = module.CollectedAsset(
-        asset_key="asset:video",
-        source_key=source.key,
-        source_name=source.name,
-        content_type=module.ContentType.VIDEO,
-        origin_url="https://cdn.example/video.mp4",
-        title="video.mp4",
-        mime_type="video/mp4",
-        local_path=ROOT / "video.mp4",
-    )
-    forwarded_video = plugin._build_chain(source, video_asset, "10001", "用户")
-    assert len(forwarded_video) == 1
-    assert type(forwarded_video[0]).__name__ == "Video"
-
     forwarded_pdf = plugin._build_chain(source, pdf_asset, "10001", "用户")
     assert len(forwarded_pdf) == 1
     assert type(forwarded_pdf[0]).__name__ == "File"

@@ -82,8 +82,7 @@
             "type": "string",
             "options": ["none", "user", "custom"],
             "labels": ["不启用", "用户", "自定义 QQ 号"],
-            "default": "user",
-            "hint": "图片和文字可使用伪造转发；视频、音频和文件会自动直接发送，避免客户端显示不支持的消息类型。"
+            "default": "user"
           },
           "custom_qq": {
             "description": "自定义 QQ 号",
@@ -166,8 +165,7 @@
             "type": "string",
             "options": ["none", "user", "custom"],
             "labels": ["不启用", "用户", "自定义 QQ 号"],
-            "default": "user",
-            "hint": "图片和文字可使用伪造转发；视频、音频和文件会自动直接发送，避免客户端显示不支持的消息类型。"
+            "default": "user"
           },
           "custom_qq": {
             "description": "自定义 QQ 号",
@@ -246,8 +244,7 @@
             "type": "string",
             "options": ["none", "user", "custom"],
             "labels": ["不启用", "用户", "自定义QQ号"],
-            "default": "user",
-            "hint": "图片和文字可使用伪造转发；视频、音频和文件会自动直接发送，避免客户端显示不支持的消息类型。"
+            "default": "user"
           },
           "custom_qq": {
             "description": "自定义 QQ 号",
