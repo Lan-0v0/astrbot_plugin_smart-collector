@@ -49,7 +49,9 @@ def _value(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
-def _pixiv_image_urls(illust: Any, quality: str = "original") -> list[tuple[str, int, int]]:
+def _pixiv_image_urls(
+    illust: Any, qualities: tuple[str, ...] = ("original",)
+) -> list[tuple[str, int, int]]:
     urls: list[tuple[str, int, int]] = []
     seen_urls: set[str] = set()
 
@@ -59,7 +61,10 @@ def _pixiv_image_urls(illust: Any, quality: str = "original") -> list[tuple[str,
             "large": str(_value(image_urls, "large", "") or "").strip(),
             "medium": str(_value(image_urls, "medium", "") or "").strip(),
         }
-        selected_url = available_urls.get(quality, "")
+        selected_url = next(
+            (available_urls[quality] for quality in qualities if available_urls.get(quality)),
+            "",
+        )
         if not selected_url or selected_url in seen_urls:
             return
         seen_urls.add(selected_url)
@@ -432,7 +437,28 @@ class PixivCollector:
             raise PixivError(
                 "Pixiv 未配置 Refresh Token，请先使用 /pixiv本地登陆 或 /pixiv远程登陆"
             )
-        word, age = parse_pixiv_query(query, source.pixiv_age_mode)
+        selected_parameters = set(source.pixiv_parameters)
+        allowed_ages = selected_parameters.intersection({"safe", "r18"})
+        if not allowed_ages:
+            raise PixivError("Pixiv 参数设定请至少勾选非R18或R18")
+        allowed_ai_types = selected_parameters.intersection({"non_ai", "ai"})
+        if not allowed_ai_types:
+            raise PixivError("Pixiv 参数设定请至少勾选非AI或AI")
+        selected_qualities = tuple(
+            quality for quality in ("original", "large", "medium") if quality in selected_parameters
+        )
+        if not selected_qualities:
+            raise PixivError("Pixiv 参数设定请至少勾选一种画质")
+        configured_age = (
+            "all"
+            if allowed_ages == {"safe", "r18"}
+            else "safe"
+            if "safe" in allowed_ages
+            else "r18"
+        )
+        word, age = parse_pixiv_query(query, configured_age)
+        if age not in allowed_ages and age != "all":
+            raise PixivError("Pixiv 指令指定的年龄段未在参数设定中启用")
         client = await self._client(token)
         lock = self._locks[token]
         async with lock:
@@ -453,11 +479,16 @@ class PixivCollector:
                 continue
             if age == "r18" and restrict == 0:
                 continue
+            is_ai_generated = int(_value(illust, "illust_ai_type", 0) or 0) == 2
+            if is_ai_generated and "ai" not in allowed_ai_types:
+                continue
+            if not is_ai_generated and "non_ai" not in allowed_ai_types:
+                continue
             title = str(_value(illust, "title", "") or "")
             tags = " ".join(
                 str(_value(tag, "name", "") or "") for tag in (_value(illust, "tags", []) or [])
             )
-            image_urls = _pixiv_image_urls(illust, source.pixiv_quality)
+            image_urls = _pixiv_image_urls(illust, selected_qualities)
             illust_id = str(_value(illust, "id", "") or "").strip()
             if not illust_id and image_urls:
                 illust_id = hashlib.sha1(image_urls[0][0].encode()).hexdigest()[:20]
@@ -487,8 +518,8 @@ class PixivCollector:
                 "large": "大图",
                 "medium": "中图",
             }
-            quality_label = quality_labels[source.pixiv_quality]
-            raise PixivError(f"Pixiv 没有找到符合年龄段且提供{quality_label}画质的图片")
+            quality_label = "、".join(quality_labels[quality] for quality in selected_qualities)
+            raise PixivError(f"Pixiv 没有找到符合年龄、AI 类型且提供{quality_label}画质的图片")
         return candidates
 
     async def _client(self, token: str) -> Any:

@@ -520,7 +520,7 @@ def test_pixiv_work_remains_deduped_after_quality_url_changes(tmp_path: Path) ->
     asyncio.run(scenario())
 
 
-def test_builtin_pixiv_converts_only_r18_results_to_pdf(monkeypatch, tmp_path: Path) -> None:
+def test_pixiv_pdf_modes_convert_the_configured_results(monkeypatch, tmp_path: Path) -> None:
     image_path = tmp_path / "pixiv.png"
     Image.new("RGB", (64, 64), "red").save(image_path)
 
@@ -556,14 +556,21 @@ def test_builtin_pixiv_converts_only_r18_results_to_pdf(monkeypatch, tmp_path: P
             dedupe=0,
             forward_mode="none",
             rate_limit=-1,
-            pixiv_age_mode="all",
-            pixiv_r18_to_pdf=True,
+            pixiv_pdf_mode="r18",
         )
         safe = await pipeline.collect(source, (ContentType.IMAGE,), "safe-user", "百合")
         assert safe.mime_type == "image/png"
         r18 = await pipeline.collect(source, (ContentType.IMAGE,), "r18-user", "百合 r18")
         assert r18.mime_type == "application/pdf"
         assert r18.local_path and r18.local_path.stat().st_size > 0
+
+        source.pixiv_pdf_mode = "all"
+        all_pdf = await pipeline.collect(source, (ContentType.IMAGE,), "all-user", "百合")
+        assert all_pdf.mime_type == "application/pdf"
+
+        source.pixiv_pdf_mode = "none"
+        disabled = await pipeline.collect(source, (ContentType.IMAGE,), "disabled-user", "百合 r18")
+        assert disabled.mime_type == "image/png"
         await pipeline.close()
 
     asyncio.run(scenario())

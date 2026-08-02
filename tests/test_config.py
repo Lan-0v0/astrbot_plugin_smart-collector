@@ -70,9 +70,8 @@ def test_schema_contains_required_default_api() -> None:
     assert list(pixiv_items) == [
         "name",
         "enabled",
+        "parameters",
         "command",
-        "age_mode",
-        "quality",
         "dedupe",
         "image_to_pdf",
         "compress",
@@ -84,10 +83,25 @@ def test_schema_contains_required_default_api() -> None:
         "schedule_time",
         "target_qq_groups",
     ]
-    assert pixiv_items["age_mode"]["default"] == "all"
-    assert pixiv_items["quality"]["options"] == ["original", "large", "medium"]
-    assert pixiv_items["quality"]["labels"] == ["原图", "大图", "中图"]
-    assert pixiv_items["quality"]["default"] == "original"
+    assert pixiv_items["parameters"]["default"] == ["safe", "r18", "non_ai", "original"]
+    assert pixiv_items["parameters"]["labels"] == [
+        "非R18",
+        "R18",
+        "非AI",
+        "AI",
+        "原图画质",
+        "大图画质",
+        "中图画质",
+    ]
+    assert pixiv_items["image_to_pdf"] == {
+        "description": "图片转 PDF",
+        "type": "string",
+        "options": ["none", "all", "r18"],
+        "labels": ["不启用", "所有图片转PDF", "R18图片转PDF"],
+        "default": "r18",
+    }
+    assert templates["website"]["items"]["image_to_pdf"]["type"] == "bool"
+    assert templates["api"]["items"]["image_to_pdf"]["type"] == "bool"
     source = load_sources({"custom_sources": [default]})[0]
     assert source.headers == {"key": "RgDEYLevGRcMSNIF8z9"}
     assert source.content_types == (ContentType.IMAGE,)
@@ -97,7 +111,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.3.6"
+    assert metadata["version"] == "v0.4.0"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -181,14 +195,12 @@ def test_source_boolean_and_rate_values_are_normalized() -> None:
             "enabled": "false",
             "image_to_pdf": "0",
             "compress": "true",
-            "pixiv_r18_to_pdf": "yes",
             "rate_limit": 99,
         }
     )
     assert not source.enabled
     assert not source.image_to_pdf
     assert source.compress
-    assert source.pixiv_r18_to_pdf
     assert source.rate_limit == 1.0
 
 
@@ -200,8 +212,8 @@ def test_pixiv_source_normalization_without_url() -> None:
                     "__template_key": "pixiv",
                     "name": "P站",
                     "command": "p",
-                    "age_mode": "r18",
-                    "quality": "large",
+                    "parameters": ["r18", "ai", "large", "medium"],
+                    "image_to_pdf": "all",
                 }
             ]
         }
@@ -212,10 +224,25 @@ def test_pixiv_source_normalization_without_url() -> None:
     assert source.url == "https://app-api.pixiv.net/"
     assert source.command == "/p"
     assert source.content_types == (ContentType.IMAGE,)
-    assert source.pixiv_age_mode == "r18"
-    assert source.pixiv_quality == "large"
+    assert source.pixiv_parameters == ("r18", "ai", "large", "medium")
+    assert source.pixiv_pdf_mode == "all"
+    assert not source.image_to_pdf
 
     legacy_source = SourceConfig.from_mapping(
-        {"__template_key": "pixiv", "name": "旧配置", "quality": "invalid"}
+        {
+            "__template_key": "pixiv",
+            "name": "旧配置",
+            "age_mode": "safe",
+            "quality": "large",
+            "image_to_pdf": True,
+        }
     )
-    assert legacy_source.pixiv_quality == "original"
+    assert legacy_source.pixiv_parameters == ("safe", "non_ai", "ai", "large")
+    assert legacy_source.pixiv_pdf_mode == "all"
+
+    legacy_disabled_pdf = SourceConfig.from_mapping(
+        {"__template_key": "pixiv", "name": "旧配置关闭 PDF", "image_to_pdf": False}
+    )
+    new_default = SourceConfig.from_mapping({"__template_key": "pixiv", "name": "新配置默认值"})
+    assert legacy_disabled_pdf.pixiv_pdf_mode == "none"
+    assert new_default.pixiv_pdf_mode == "r18"

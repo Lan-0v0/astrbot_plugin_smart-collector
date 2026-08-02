@@ -37,9 +37,13 @@ def test_pixiv_image_quality_modes_select_expected_urls() -> None:
         "meta_pages": [],
     }
     for quality in ("original", "large", "medium"):
-        assert _pixiv_image_urls(illustration, quality) == [
+        assert _pixiv_image_urls(illustration, (quality,)) == [
             (f"https://i.pximg.net/{quality}.jpg", 1200, 1800)
         ]
+    illustration["meta_single_page"]["original_image_url"] = ""
+    assert _pixiv_image_urls(illustration, ("original", "large", "medium")) == [
+        ("https://i.pximg.net/large.jpg", 1200, 1800)
+    ]
 
 
 def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path) -> None:
@@ -76,6 +80,7 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
                     {
                         "title": "R18 多图",
                         "x_restrict": 1,
+                        "illust_ai_type": 1,
                         "width": 1600,
                         "height": 2400,
                         "meta_single_page": {},
@@ -93,6 +98,22 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
                         ],
                         "tags": [{"name": "百合"}, {"name": "JK"}],
                     },
+                    {
+                        "title": "AI R18",
+                        "x_restrict": 1,
+                        "illust_ai_type": 2,
+                        "width": 1024,
+                        "height": 1024,
+                        "meta_single_page": {
+                            "original_image_url": "https://i.pximg.net/img-original/ai-r18.jpg"
+                        },
+                        "image_urls": {
+                            "large": "https://i.pximg.net/img-master/ai-r18.jpg",
+                            "medium": "https://i.pximg.net/img-master/ai-r18-medium.jpg",
+                        },
+                        "meta_pages": [],
+                        "tags": [{"name": "百合"}, {"name": "JK"}],
+                    },
                 ],
                 "next_url": "",
             }
@@ -103,7 +124,7 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
                 "__template_key": "pixiv",
                 "name": "P站",
                 "refresh_token": "test-token",
-                "age_mode": "r18",
+                "parameters": ["r18", "non_ai", "original"],
             }
         )
         collector = PixivCollector(tmp_path)
@@ -128,12 +149,23 @@ def test_pixiv_collector_extracts_original_pages_and_filters_age(tmp_path: Path)
                 "__template_key": "pixiv",
                 "name": "P站全部年龄段",
                 "refresh_token": "test-token",
-                "age_mode": "all",
+                "parameters": ["safe", "r18", "non_ai", "original"],
             }
         )
         all_candidates = await collector.candidates(all_source, "百合 JK")
         safe_candidate = next(item for item in all_candidates if not item.r18)
         assert safe_candidate.url == "https://i.pximg.net/img-original/safe.jpg"
+
+        ai_source = SourceConfig.from_mapping(
+            {
+                "__template_key": "pixiv",
+                "name": "P站 AI",
+                "refresh_token": "test-token",
+                "parameters": ["r18", "ai", "large"],
+            }
+        )
+        ai_candidates = await collector.candidates(ai_source, "百合 JK")
+        assert [item.url for item in ai_candidates] == ["https://i.pximg.net/img-master/ai-r18.jpg"]
 
     asyncio.run(scenario())
 

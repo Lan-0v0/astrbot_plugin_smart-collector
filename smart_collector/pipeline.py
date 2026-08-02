@@ -185,9 +185,10 @@ class CollectorPipeline:
                     raise PixivError("Pixiv 搜索结果均已发送过，请更换 Tag 后重试")
             except PixivError as exc:
                 raise CollectionError(str(exc)) from exc
-            if (
-                source.image_to_pdf or (source.pixiv_r18_to_pdf and asset.r18)
-            ) and asset.content_type is ContentType.IMAGE:
+            should_convert_pixiv_to_pdf = source.pixiv_pdf_mode == "all" or (
+                source.pixiv_pdf_mode == "r18" and asset.r18
+            )
+            if should_convert_pixiv_to_pdf and asset.content_type is ContentType.IMAGE:
                 asset = await self.postprocessor.image_to_pdf(asset)
             if source.compress and asset.content_type in {ContentType.IMAGE, ContentType.VIDEO}:
                 asset = await self.postprocessor.compress(asset, source.compression_password)

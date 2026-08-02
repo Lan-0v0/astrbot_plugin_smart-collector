@@ -214,22 +214,15 @@
         "items": {
           "name": {"description": "名称", "type": "string", "default": ""},
           "enabled": {"description": "启用", "type": "bool", "default": true},
+          "parameters": {
+            "description": "参数设定",
+            "type": "list",
+            "options": ["safe", "r18", "non_ai", "ai", "original", "large", "medium"],
+            "labels": ["非R18", "R18", "非AI", "AI", "原图画质", "大图画质", "中图画质"],
+            "default": ["safe", "r18", "non_ai", "original"],
+            "hint": "年龄、AI 类型和画质均可多选；多个画质按原图、大图、中图顺序使用首个可用规格。"
+          },
           "command": {"description": "专属指令", "type": "string", "default": ""},
-          "age_mode": {
-            "description": "年龄段",
-            "type": "string",
-            "options": ["safe", "r18", "all"],
-            "labels": ["仅全年龄", "仅R18", "全部"],
-            "default": "all"
-          },
-          "quality": {
-            "description": "画质",
-            "type": "string",
-            "options": ["original", "large", "medium"],
-            "labels": ["原图", "大图", "中图"],
-            "default": "original",
-            "hint": "只使用指定画质，不执行多规格串行回退。"
-          },
           "dedupe": {
             "description": "去重",
             "type": "int",
@@ -237,7 +230,13 @@
             "slider": {"min": -1, "max": 0, "step": 1},
             "hint": "-1 不启用，0 永不重复。"
           },
-          "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
+          "image_to_pdf": {
+            "description": "图片转 PDF",
+            "type": "string",
+            "options": ["none", "all", "r18"],
+            "labels": ["不启用", "所有图片转PDF", "R18图片转PDF"],
+            "default": "r18"
+          },
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
           "compression_password": {
             "description": "压缩密码",

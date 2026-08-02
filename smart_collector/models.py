@@ -33,6 +33,17 @@ CONTENT_LABELS = {
     "文本": ContentType.TEXT,
 }
 
+PIXIV_PARAMETER_ORDER = (
+    "safe",
+    "r18",
+    "non_ai",
+    "ai",
+    "original",
+    "large",
+    "medium",
+)
+DEFAULT_PIXIV_PARAMETERS = ("safe", "r18", "non_ai", "original")
+
 
 def safe_output_name(value: str) -> str:
     """Convert an asset key into a stable single path component."""
@@ -93,6 +104,38 @@ def normalize_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def normalize_pixiv_parameters(value: Any, legacy_value: dict[str, Any]) -> tuple[str, ...]:
+    if value is None:
+        legacy_age_mode = str(legacy_value.get("age_mode") or "").strip().lower()
+        legacy_quality = str(legacy_value.get("quality") or "").strip().lower()
+        if legacy_age_mode or legacy_quality:
+            age_parameters = {
+                "safe": ("safe",),
+                "r18": ("r18",),
+                "all": ("safe", "r18"),
+            }.get(legacy_age_mode, ("safe", "r18"))
+            quality_parameter = (
+                legacy_quality if legacy_quality in {"original", "large", "medium"} else "original"
+            )
+            return (*age_parameters, "non_ai", "ai", quality_parameter)
+        return DEFAULT_PIXIV_PARAMETERS
+    if isinstance(value, str) or not isinstance(value, (list, tuple, set)):
+        value = [value]
+    selected = {str(item).strip().lower() for item in value}
+    return tuple(parameter for parameter in PIXIV_PARAMETER_ORDER if parameter in selected)
+
+
+def normalize_pixiv_pdf_mode(value: Any, legacy_value: dict[str, Any]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"none", "all", "r18"}:
+        return normalized
+    if "image_to_pdf" in legacy_value:
+        return "all" if normalize_bool(value, False) else "none"
+    if normalize_bool(legacy_value.get("pixiv_r18_to_pdf", False)):
+        return "r18"
+    return "r18"
+
+
 def _safe_number(value: Any, default: int | float, converter: type[int] | type[float]):
     try:
         converted = converter(value)
@@ -127,9 +170,8 @@ class SourceConfig:
     schedule_time: str = "23:00"
     target_qq_groups: tuple[str, ...] = ()
     pixiv_refresh_token: str = ""
-    pixiv_age_mode: str = "all"
-    pixiv_quality: str = "original"
-    pixiv_r18_to_pdf: bool = False
+    pixiv_parameters: tuple[str, ...] = DEFAULT_PIXIV_PARAMETERS
+    pixiv_pdf_mode: str = "r18"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any], index: int = 0) -> SourceConfig:
@@ -169,12 +211,8 @@ class SourceConfig:
             forward_mode = "user"
 
         pixiv_refresh_token = str(value.get("refresh_token") or "").strip()
-        pixiv_age_mode = str(value.get("age_mode") or "all").strip().lower()
-        if pixiv_age_mode not in {"all", "safe", "r18"}:
-            pixiv_age_mode = "all"
-        pixiv_quality = str(value.get("quality") or "original").strip().lower()
-        if pixiv_quality not in {"original", "large", "medium"}:
-            pixiv_quality = "original"
+        pixiv_parameters = normalize_pixiv_parameters(value.get("parameters"), value)
+        pixiv_pdf_mode = normalize_pixiv_pdf_mode(value.get("image_to_pdf"), value)
         url = str(value.get("url") or "").strip()
         if template == "pixiv":
             url = url or "https://app-api.pixiv.net/"
@@ -194,7 +232,9 @@ class SourceConfig:
             video_quality=normalize_video_quality(value.get("video_quality")),
             cookies=tuple(str(item).strip() for item in cookies if str(item).strip()),
             headers=headers,
-            image_to_pdf=normalize_bool(value.get("image_to_pdf", False)),
+            image_to_pdf=(
+                False if template == "pixiv" else normalize_bool(value.get("image_to_pdf", False))
+            ),
             compress=normalize_bool(value.get("compress", False)),
             video_url_only=(
                 template == "website" and normalize_bool(value.get("video_url_only", False))
@@ -211,9 +251,8 @@ class SourceConfig:
                 )
             ),
             pixiv_refresh_token=pixiv_refresh_token,
-            pixiv_age_mode=pixiv_age_mode,
-            pixiv_quality=pixiv_quality,
-            pixiv_r18_to_pdf=normalize_bool(value.get("pixiv_r18_to_pdf", False)),
+            pixiv_parameters=pixiv_parameters,
+            pixiv_pdf_mode=pixiv_pdf_mode,
         )
 
 

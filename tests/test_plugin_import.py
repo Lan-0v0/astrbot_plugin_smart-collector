@@ -235,9 +235,8 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     builtin = plugin._default_pixiv_source()
     assert builtin.key == "pixiv:__builtin__"
     assert builtin.command == "/pixiv"
-    assert builtin.pixiv_age_mode == "all"
-    assert builtin.pixiv_quality == "original"
-    assert builtin.pixiv_r18_to_pdf
+    assert builtin.pixiv_parameters == ("safe", "r18", "non_ai", "original")
+    assert builtin.pixiv_pdf_mode == "r18"
     assert builtin.dedupe == 0
     assert not builtin.compress
     assert builtin.forward_mode == "none"
@@ -249,9 +248,9 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
             "__template_key": "pixiv",
             "name": "自定义",
             "command": "/p",
-            "age_mode": "safe",
+            "parameters": ["safe", "non_ai", "large"],
             "dedupe": -1,
-            "image_to_pdf": True,
+            "image_to_pdf": "all",
             "compress": True,
             "forward_mode": "user",
             "rate_limit": -1,
