@@ -118,6 +118,7 @@ class SourceConfig:
     headers: dict[str, str] = field(default_factory=dict)
     image_to_pdf: bool = False
     compress: bool = False
+    video_url_only: bool = False
     compression_password: str = ""
     forward_mode: str = "user"
     custom_qq: str = ""
@@ -195,6 +196,9 @@ class SourceConfig:
             headers=headers,
             image_to_pdf=normalize_bool(value.get("image_to_pdf", False)),
             compress=normalize_bool(value.get("compress", False)),
+            video_url_only=(
+                template == "website" and normalize_bool(value.get("video_url_only", False))
+            ),
             compression_password=str(value.get("compression_password") or ""),
             forward_mode=forward_mode,
             custom_qq=str(value.get("custom_qq") or ""),

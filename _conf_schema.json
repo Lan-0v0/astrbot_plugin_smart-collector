@@ -70,6 +70,12 @@
           },
           "image_to_pdf": {"description": "图片转 PDF", "type": "bool", "default": false},
           "compress": {"description": "爬取后压缩", "type": "bool", "default": false},
+          "video_url_only": {
+            "description": "视频内容仅发送URL",
+            "type": "bool",
+            "default": false,
+            "hint": "仅网站条目生效；筛选后直接把可访问的实体视频 URL 放入消息，HLS/DASH 等清单仍不会直接发送。"
+          },
           "compression_password": {
             "description": "压缩密码",
             "type": "string",

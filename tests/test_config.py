@@ -47,6 +47,11 @@ def test_schema_contains_required_default_api() -> None:
         assert key not in default
     templates = schema["custom_sources"]["templates"]
     assert set(templates) == {"website", "api", "pixiv"}
+    website_items = templates["website"]["items"]
+    assert website_items["video_url_only"]["default"] is False
+    assert list(website_items).index("video_url_only") == list(website_items).index("compress") + 1
+    assert "video_url_only" not in templates["api"]["items"]
+    assert "video_url_only" not in templates["pixiv"]["items"]
     for template_key, template in templates.items():
         items = template["items"]
         assert items["dedupe"]["slider"] == {"min": -1, "max": 0, "step": 1}
@@ -92,7 +97,7 @@ def test_schema_contains_required_default_api() -> None:
 def test_metadata_version_and_required_fields() -> None:
     metadata = yaml.safe_load((ROOT / "metadata.yaml").read_text(encoding="utf-8"))
     assert metadata["name"] == "astrbot_plugin_smart_collector"
-    assert metadata["version"] == "v0.3.3"
+    assert metadata["version"] == "v0.3.4"
     assert metadata["repo"] == "https://github.com/Lan-0v0/astrbot_plugin_smart-collector"
 
 
@@ -123,12 +128,14 @@ def test_source_normalization() -> None:
             "command": "图片",
             "cookies": ["a=1", "b=2"],
             "video_quality": "highest",
+            "video_url_only": True,
             "target_qq_groups": [123456, "123456", "bad", " 654321 "],
         }
     )
     assert source.command == "/图片"
     assert source.cookies == ("a=1", "b=2")
     assert source.video_quality == "highest"
+    assert source.video_url_only
     assert source.target_qq_groups == ("123456", "654321")
     assert source.key.startswith("website:示例:")
     assert normalize_time("7:05") == "07:05"
@@ -151,12 +158,20 @@ def test_source_normalization_tolerates_invalid_legacy_values() -> None:
     assert source.rate_limit == 1.0
     assert source.forward_mode == "user"
     assert source.schedules == ("每天",)
+    assert not source.video_url_only
 
     source = SourceConfig.from_mapping(
         {"url": "https://example.com", "dedupe": -99, "rate_limit": "-1"}
     )
     assert source.dedupe == -1
     assert source.rate_limit == -1.0
+
+    api_source = SourceConfig.from_mapping(
+        {"__template_key": "api", "url": "https://example.com/api", "video_url_only": True}
+    )
+    pixiv_source = SourceConfig.from_mapping({"__template_key": "pixiv", "video_url_only": True})
+    assert not api_source.video_url_only
+    assert not pixiv_source.video_url_only
 
 
 def test_source_boolean_and_rate_values_are_normalized() -> None:

@@ -46,6 +46,10 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
             return cls(path)
 
         @classmethod
+        def fromURL(cls, url):
+            return cls(url)
+
+        @classmethod
         def fromBytes(cls, value):
             return cls(value)
 
@@ -122,6 +126,24 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert type(forwarded[0]).__name__ == "Node"
     assert len(forwarded[0].kwargs["content"]) == 1
     assert type(forwarded[0].kwargs["content"][0]).__name__ == "Image"
+
+    source.video_url_only = True
+    url_video_asset = module.CollectedAsset(
+        asset_key="asset:video-url",
+        source_key=source.key,
+        source_name=source.name,
+        content_type=module.ContentType.VIDEO,
+        origin_url="https://cdn.example/video.mp4",
+        mime_type="video/mp4",
+    )
+    forwarded_video = plugin._build_chain(source, url_video_asset, "10001", "用户")
+    assert len(forwarded_video) == 1
+    assert type(forwarded_video[0]).__name__ == "Node"
+    forwarded_video_content = forwarded_video[0].kwargs["content"]
+    assert len(forwarded_video_content) == 1
+    assert type(forwarded_video_content[0]).__name__ == "Video"
+    assert forwarded_video_content[0].args == ("https://cdn.example/video.mp4",)
+    source.video_url_only = False
 
     forwarded_pdf = plugin._build_chain(source, pdf_asset, "10001", "用户")
     assert len(forwarded_pdf) == 1

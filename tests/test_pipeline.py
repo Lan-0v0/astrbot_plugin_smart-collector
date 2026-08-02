@@ -1372,6 +1372,91 @@ def test_video_quality_orders_known_resolutions_and_unknown_sizes(tmp_path: Path
     asyncio.run(scenario())
 
 
+def test_website_video_url_only_selects_quality_without_downloading(tmp_path: Path) -> None:
+    class UrlOnlyFetcher:
+        def __init__(self) -> None:
+            self.downloads: list[str] = []
+
+        async def _validate_network_url(self, url: str) -> None:
+            return None
+
+        async def probe(self, url: str, *, headers=None) -> FetchResponse:
+            size = 5_000_000 if "1080" in url else 1_000_000
+            return FetchResponse(
+                url=url,
+                status=200,
+                content_type="video/mp4",
+                body=b"",
+                headers={"content-length": str(size)},
+            )
+
+        async def download(self, url: str, destination: Path, *, headers=None):
+            self.downloads.append(url)
+            raise AssertionError("URL-only video must not be downloaded")
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path)
+        await pipeline.initialize()
+        await pipeline.fetcher.close()
+        fake = UrlOnlyFetcher()
+        pipeline.fetcher = fake  # type: ignore[assignment]
+        source = SourceConfig(
+            key="website:url-only",
+            template="website",
+            name="URL only",
+            enabled=True,
+            url="https://source.example/page",
+            content_types=(ContentType.VIDEO,),
+            command="/video",
+            video_quality="highest",
+            video_url_only=True,
+            dedupe=-1,
+            rate_limit=-1,
+        )
+        low = Candidate(
+            ContentType.VIDEO,
+            url="https://cdn.example/video-360.mp4",
+            width=640,
+            height=360,
+        )
+        high = Candidate(
+            ContentType.VIDEO,
+            url="https://cdn.example/video-1080.mp4",
+            width=1920,
+            height=1080,
+        )
+        asset = await pipeline._try_candidates(
+            source,
+            FetchResponse(source.url, 200, "text/html", b""),
+            [low, high],
+        )
+        assert asset
+        assert asset.origin_url == high.url
+        assert asset.mime_type == "video/mp4"
+        assert asset.local_path is None
+        assert fake.downloads == []
+
+        manifest = await pipeline._try_candidates(
+            source,
+            FetchResponse(source.url, 200, "text/html", b""),
+            [
+                Candidate(
+                    ContentType.VIDEO,
+                    url="https://cdn.example/master.m3u8",
+                    mime_type="application/vnd.apple.mpegurl",
+                )
+            ],
+        )
+        assert manifest is None
+        assert fake.downloads == []
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_probe_size_uses_range_total_and_ignores_encoded_length() -> None:
     ranged = FetchResponse(
         "https://cdn.example/image.jpg",

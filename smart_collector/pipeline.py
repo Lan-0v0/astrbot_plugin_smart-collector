@@ -493,7 +493,18 @@ class CollectorPipeline:
                 }
                 if candidate.url and not dynamic_origin:
                     cached = cached_assets.get(candidate.url)
-                    if cached and await self._image_asset_matches(cached, candidate, query):
+                    cached_url_video = (
+                        source.template == "website"
+                        and source.video_url_only
+                        and candidate.content_type is ContentType.VIDEO
+                        and cached is not None
+                        and cached.local_path is None
+                    )
+                    if (
+                        cached
+                        and not cached_url_video
+                        and await self._image_asset_matches(cached, candidate, query)
+                    ):
                         return cached
                 if (
                     candidate.content_type is ContentType.IMAGE
@@ -502,7 +513,16 @@ class CollectorPipeline:
                 ):
                     continue
                 try:
-                    asset = await self._materialize(source, candidate, source_response)
+                    if (
+                        source.template == "website"
+                        and source.video_url_only
+                        and candidate.content_type is ContentType.VIDEO
+                    ):
+                        asset = await self._materialize_video_url(source, candidate)
+                        if asset is None:
+                            continue
+                    else:
+                        asset = await self._materialize(source, candidate, source_response)
                 except Exception:
                     continue
                 if await self.cache.is_allowed(
@@ -518,6 +538,48 @@ class CollectorPipeline:
                 ):
                     return asset
         return None
+
+    async def _materialize_video_url(
+        self, source: SourceConfig, candidate: Candidate
+    ) -> CollectedAsset | None:
+        """Create a sendable URL asset without downloading the selected video."""
+        if source.template != "website" or not candidate.url:
+            return None
+        url_parts = urlsplit(candidate.url)
+        if url_parts.scheme not in {"http", "https"}:
+            return None
+        candidate_path = url_parts.path.lower()
+        candidate_mime = candidate.mime_type.split(";", 1)[0].lower()
+        if (
+            candidate_path.endswith((".m3u8", ".mpd"))
+            or candidate_mime in VIDEO_MANIFEST_MIME_TYPES
+            or candidate.selector == "yt-dlp-download"
+        ):
+            return None
+        try:
+            network_validator = getattr(self.fetcher, "_validate_network_url", None)
+            if callable(network_validator):
+                await network_validator(candidate.url)
+            else:
+                AntiBotFetcher._validate_url(candidate.url)
+        except FetchError:
+            return None
+        content_digest = hashlib.sha256(
+            f"{source.key}:video-url:{candidate.url}".encode()
+        ).hexdigest()
+        asset = CollectedAsset(
+            asset_key=content_digest,
+            source_key=source.key,
+            source_name=source.name,
+            content_type=ContentType.VIDEO,
+            origin_url=candidate.url,
+            title=candidate.title,
+            mime_type=candidate_mime or "video/mp4",
+            local_path=None,
+            cached=False,
+        )
+        await self.cache.save_asset(asset)
+        return asset
 
     @staticmethod
     def _is_dynamic_candidate(candidate: Candidate, source_response: FetchResponse) -> bool:
@@ -613,12 +675,16 @@ class CollectorPipeline:
                         )
             if response is None:
                 return (2, *quality_order(candidate, 0), index)
+            if response.transport != "cache" and response.url:
+                candidate.url = response.url
             try:
                 size = self._response_size(response)
             except (TypeError, ValueError):
                 size = 0
             candidate.content_length = 0 if response.transport == "cache" else max(0, size)
             actual_type = self.extractor._mime_type(response.content_type)
+            if actual_type is candidate.content_type and response.content_type:
+                candidate.mime_type = response.content_type
             if candidate.content_type is ContentType.IMAGE:
                 score = self._image_candidate_score(candidate, query, size)
                 if 200 <= response.status < 300 and actual_type is ContentType.IMAGE:
@@ -1073,6 +1139,13 @@ class CollectorPipeline:
             if content_type not in allowed_types:
                 continue
             for asset in assets:
+                if (
+                    source.template == "website"
+                    and source.video_url_only
+                    and asset.content_type is ContentType.VIDEO
+                    and asset.local_path is not None
+                ):
+                    continue
                 if asset.content_type is content_type and await self._image_asset_matches(
                     asset, Candidate(content_type=content_type), query
                 ):
