@@ -46,10 +46,6 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
             return cls(path)
 
         @classmethod
-        def fromURL(cls, url):
-            return cls(url)
-
-        @classmethod
         def fromBytes(cls, value):
             return cls(value)
 
@@ -141,7 +137,7 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
     assert type(forwarded_video[0]).__name__ == "Node"
     forwarded_video_content = forwarded_video[0].kwargs["content"]
     assert len(forwarded_video_content) == 1
-    assert type(forwarded_video_content[0]).__name__ == "Video"
+    assert type(forwarded_video_content[0]).__name__ == "Plain"
     assert forwarded_video_content[0].args == ("https://cdn.example/video.mp4",)
     source.video_url_only = False
 

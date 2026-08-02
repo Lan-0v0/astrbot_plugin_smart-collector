@@ -74,7 +74,7 @@
             "description": "视频内容仅发送URL",
             "type": "bool",
             "default": false,
-            "hint": "仅网站条目生效；筛选后直接把可访问的实体视频 URL 放入消息，HLS/DASH 等清单仍不会直接发送。"
+            "hint": "仅网站条目生效；筛选后以纯文本发送可访问的实体视频 URL，不下载视频，HLS/DASH 等清单不会直接发送。"
           },
           "compression_password": {
             "description": "压缩密码",
