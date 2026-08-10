@@ -467,6 +467,34 @@ def test_single_source_failure_does_not_prefix_source_name(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_collect_many_rejects_incompatible_sources_without_aggregated_errors(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        pipeline = CollectorPipeline(tmp_path, image_ignore_size_kb=-1)
+        await pipeline.initialize()
+        source_names = ("图片源", "另一个图片源")
+        sources = [
+            SourceConfig.from_mapping(
+                {
+                    "name": source_name,
+                    "url": f"https://example.com/{source_index}",
+                    "content_types": ["image"],
+                }
+            )
+            for source_index, source_name in enumerate(source_names)
+        ]
+
+        with pytest.raises(CollectionError) as error:
+            await pipeline.collect_many(sources, (ContentType.VIDEO,), "user")
+
+        assert str(error.value) == "没有已启用的数据源支持所请求的内容类型"
+        assert all(source_name not in str(error.value) for source_name in source_names)
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
 def test_pixiv_work_remains_deduped_after_quality_url_changes(tmp_path: Path) -> None:
     class QualityFetcher:
         async def download(self, url, destination, *, headers=None):

@@ -283,6 +283,50 @@ def test_plugin_module_loads_with_official_api_surface(monkeypatch, tmp_path: Pa
 
     asyncio.run(builtin_pixiv_command_scenario())
     assert captured_sources == [builtin]
+
+    quoted_request = types.SimpleNamespace(
+        chain=[types.SimpleNamespace(text="https://www.youtube.com/watch?v=KKLSDqVGGZ0")]
+    )
+
+    class QuotedUrlEvent:
+        message_str = "给我做个这个 明天我验收"
+
+        @staticmethod
+        def get_message_str():
+            return QuotedUrlEvent.message_str
+
+        @staticmethod
+        def get_messages():
+            return [quoted_request]
+
+    captured_natural_language_sources = []
+
+    async def capture_natural_language_source(self, event, sources, query, explicit_types=None):
+        captured_natural_language_sources.extend(sources)
+        yield query
+
+    async def quoted_url_scenario() -> None:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                module.SmartCollectorPlugin,
+                "_collect_and_reply",
+                capture_natural_language_source,
+            )
+            results = [
+                item
+                async for item in plugin.smart_collect(
+                    QuotedUrlEvent(),
+                    "给我做个这个 明天我验收",
+                    content_types=["video"],
+                )
+            ]
+        assert results == ["给我做个这个 明天我验收"]
+
+    asyncio.run(quoted_url_scenario())
+    assert len(captured_natural_language_sources) == 1
+    assert captured_natural_language_sources[0].name == "临时 URL"
+    assert captured_natural_language_sources[0].url == "https://www.youtube.com/watch?v=KKLSDqVGGZ0"
+
     conflicting_pixiv = module.SourceConfig.from_mapping(
         {"__template_key": "pixiv", "name": "冲突 Pixiv", "command": "/pixiv"}
     )

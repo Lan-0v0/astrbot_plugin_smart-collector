@@ -134,13 +134,21 @@ class CollectorPipeline:
         enabled = [source for source in sources if source.enabled]
         if not enabled:
             raise CollectionError("没有已启用的自定义爬取项")
+        compatible = [
+            source
+            for source in enabled
+            if requested is None
+            or any(content_type in source.content_types for content_type in requested)
+        ]
+        if not compatible:
+            raise CollectionError("没有已启用的数据源支持所请求的内容类型")
         results = await asyncio.gather(
-            *(self._collect(source, requested, user_key, query) for source in enabled),
+            *(self._collect(source, requested, user_key, query) for source in compatible),
             return_exceptions=True,
         )
         successful: list[tuple[SourceConfig, CollectedAsset]] = []
         errors: list[str] = []
-        for source, result in zip(enabled, results, strict=True):
+        for source, result in zip(compatible, results, strict=True):
             if isinstance(result, BaseException):
                 errors.append(f"{source.name}: {result}")
             else:

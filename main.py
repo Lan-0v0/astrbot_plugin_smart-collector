@@ -96,6 +96,71 @@ def _command_arguments(message: str, command: str) -> str | None:
     return None
 
 
+MESSAGE_TEXT_ATTRIBUTES = (
+    "text",
+    "url",
+    "message_str",
+    "chain",
+    "message",
+    "content",
+    "reply",
+)
+
+
+def _url_from_message_value(
+    value: object,
+    visited: set[int] | None = None,
+    depth: int = 0,
+) -> str:
+    """Find the first HTTP URL in a message component or nested reply chain."""
+    if value is None or depth > 8:
+        return ""
+    if isinstance(value, str):
+        url, _ = split_url_request(value)
+        return url
+    if isinstance(value, (bytes, bytearray, int, float, bool)):
+        return ""
+
+    visited = visited if visited is not None else set()
+    value_identity = id(value)
+    if value_identity in visited:
+        return ""
+    visited.add(value_identity)
+
+    if isinstance(value, dict):
+        nested_values = (value.get(attribute) for attribute in MESSAGE_TEXT_ATTRIBUTES)
+    elif isinstance(value, (list, tuple, set)):
+        nested_values = iter(value)
+    else:
+        nested_values = (getattr(value, attribute, None) for attribute in MESSAGE_TEXT_ATTRIBUTES)
+
+    for nested_value in nested_values:
+        url = _url_from_message_value(nested_value, visited, depth + 1)
+        if url:
+            return url
+    return ""
+
+
+def _url_from_event(event: AstrMessageEvent) -> str:
+    """Read a URL from either the current text or a structured quoted message."""
+    message_values: list[object] = []
+    get_message_str = getattr(event, "get_message_str", None)
+    if callable(get_message_str):
+        with suppress(Exception):
+            message_values.append(get_message_str())
+    message_values.append(getattr(event, "message_str", ""))
+
+    get_messages = getattr(event, "get_messages", None)
+    if callable(get_messages):
+        with suppress(Exception):
+            message_values.append(get_messages())
+    message_object = getattr(event, "message_obj", None)
+    if message_object is not None:
+        message_values.append(getattr(message_object, "message", message_object))
+
+    return _url_from_message_value(message_values)
+
+
 def _qr_png(value: str) -> bytes:
     import qrcode
 
@@ -131,7 +196,7 @@ class CustomSourceCommandFilter(filter.CustomFilter):
     "astrbot_plugin_smart_collector",
     "Lan-0v0",
     "支持视频、音频、图片和文字的并发自适应采集插件",
-    "v0.4.0",
+    "v0.4.1",
 )
 class SmartCollectorPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -181,7 +246,7 @@ class SmartCollectorPlugin(Star):
             asyncio.create_task(self._scheduler_loop(), name="smart-collector-scheduler"),
             asyncio.create_task(self._cleanup_loop(), name="smart-collector-cleanup"),
         ]
-        logger.info("Smart Collector v0.4.0 已加载，共 %d 个自定义爬取项", len(self.sources))
+        logger.info("Smart Collector v0.4.1 已加载，共 %d 个自定义爬取项", len(self.sources))
 
     @filter.command("pixiv")
     async def pixiv_command(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -278,9 +343,10 @@ class SmartCollectorPlugin(Star):
             yield event.plain_result("自然语言爬取已在插件配置中关闭。")
             return
         query_url, query = split_url_request(query)
-        target_url = url.strip() or query_url
+        provided_url = url.strip()
+        target_url = provided_url or query_url or _url_from_event(event)
         explicit_types: tuple[ContentType, ...] | None = None
-        if not url.strip() and (
+        if not target_url and (
             source_name.strip().casefold() == "pixiv"
             or (not source_name.strip() and re.search(r"pixiv|p站", query, re.IGNORECASE))
         ):
