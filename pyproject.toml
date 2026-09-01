@@ -21,7 +21,7 @@ dependencies = [
   "jsbeautifier>=2,<3",
   "pixivpy3>=3.7.5,<3.8",
   "qrcode[pil]>=7.4,<9",
-  "websockets>=13,<16",
+  "websockets>=13,<17",
 ]
 
 [tool.setuptools.packages.find]
